@@ -8,6 +8,7 @@ import { INITIAL_HOURLY_RATE, INITIAL_DAILY_RATE, INITIAL_PERIOD_RATES, getClosi
 import { Button } from './Button';
 import { Modal } from './Modal';
 import { Input } from './Input';
+import { PasswordInput } from './PasswordInput';
 import { format, parseISO, addDays, isToday, isSameDay } from 'date-fns';
 import { ptBR } from 'date-fns/locale/pt-BR';
 import { 
@@ -15,10 +16,11 @@ import {
   DollarSign, FileText, Ban, Settings, ShieldAlert, 
   Search, CheckCircle2, XCircle, Trash2, Edit2, 
   Download, Plus, RefreshCw, Clock, ArrowRight, Lock,
-  UserX, AlertTriangle, KeyRound, Copy, Eye, EyeOff, MessageCircle
+  UserX, AlertTriangle, KeyRound, Copy, Eye, EyeOff, MessageCircle,
+  UserCheck, ShieldCheck, Check
 } from 'lucide-react';
 import { useToast } from './Toast';
-import { checkPasswordStrength } from '../utils/passwordSecurity';
+import { checkPasswordStrength, getPasswordValidationMessage } from '../utils/passwordSecurity';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -31,24 +33,51 @@ type AdminTab =
   | 'reports' 
   | 'blocks' 
   | 'settings' 
-  | 'audit';
+  | 'audit'
+  | 'profile';
 
 interface AdminPanelProps {
   currentUser?: User | null;
+  onUpdateUser?: (user: User) => void;
+  initialTab?: AdminTab;
 }
 
-export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
+export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUser, initialTab }) => {
   const adminActor: User = useMemo(() => {
     return currentUser || {
       id: 'admin',
       name: 'Administrador',
-      email: '',
+      email: 'admin@admin.com.br',
       role: 'ADMIN',
       status: 'ACTIVE',
       createdAt: new Date().toISOString()
     };
   }, [currentUser]);
-  const [activeTab, setActiveTab] = useState<AdminTab>('dashboard');
+  const [activeTab, setActiveTab] = useState<AdminTab>(initialTab || 'dashboard');
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
+
+  // Admin Profile State
+  const [adminName, setAdminName] = useState(currentUser?.name || 'Administrador');
+  const [adminPhone, setAdminPhone] = useState(currentUser?.phone || '');
+  const [adminWhatsapp, setAdminWhatsapp] = useState(currentUser?.whatsapp || '');
+  const [adminCpf, setAdminCpf] = useState(currentUser?.cpf || '');
+  const [adminNewPassword, setAdminNewPassword] = useState('');
+  const [adminConfirmPassword, setAdminConfirmPassword] = useState('');
+  const [isSavingAdminProfile, setIsSavingAdminProfile] = useState(false);
+
+  useEffect(() => {
+    if (currentUser) {
+      setAdminName(currentUser.name);
+      setAdminPhone(currentUser.phone || '');
+      setAdminWhatsapp(currentUser.whatsapp || '');
+      setAdminCpf(currentUser.cpf || '');
+    }
+  }, [currentUser]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -333,34 +362,75 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
     setEditMorningRate(mRate);
     setEditAfternoonRate(aRate);
     setEditNightRate(nRate);
-    setEditDailyRate(room.dailyRate || (mRate + aRate + nRate));
+    setEditDailyRate(room.dailyRate || room.fullDayRate || (mRate + aRate + nRate));
   };
 
   const handleSaveRoomRates = async () => {
     if (!editingRoom) return;
     if (editHourlyRate <= 0) return addToast('O valor da hora deve ser maior que zero.', 'error');
     if (editMorningRate <= 0 || editAfternoonRate <= 0 || editNightRate <= 0) {
-      return addToast('Os valores dos períodos (manhã, tarde e noite) devem ser maiores que zero.', 'error');
+      return addToast('Os valores dos turnos (manhã, tarde e noite) devem ser maiores que zero.', 'error');
+    }
+    if (editDailyRate <= 0) {
+      return addToast('O valor do período de 1 dia deve ser maior que zero.', 'error');
     }
     setIsUpdatingRates(true);
     try {
-      const calculatedDaily = editDailyRate > 0 ? editDailyRate : (editMorningRate + editAfternoonRate + editNightRate);
       await bookingService.updateRoomRates(
         editingRoom.id,
         editHourlyRate,
-        calculatedDaily,
+        editDailyRate,
         adminActor,
         editMorningRate,
         editAfternoonRate,
         editNightRate
       );
-      addToast(`Tarifas por períodos da ${editingRoom.id} atualizadas com sucesso!`, 'success');
+      addToast(`Tarifas da ${editingRoom.id} (turnos e 1 dia) atualizadas com sucesso!`, 'success');
       setEditingRoom(null);
       await loadAdminData();
     } catch (err: any) {
       addToast(err.message || 'Erro ao atualizar tarifas.', 'error');
     } finally {
       setIsUpdatingRates(false);
+    }
+  };
+
+  const handleSaveAdminProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminName.trim()) {
+      return addToast('O nome completo não pode estar em branco.', 'error');
+    }
+
+    if (adminNewPassword) {
+      const pwdError = getPasswordValidationMessage(adminNewPassword);
+      if (pwdError) return addToast(pwdError, 'error');
+      if (adminNewPassword !== adminConfirmPassword) {
+        return addToast('A confirmação de senha não confere.', 'error');
+      }
+    }
+
+    setIsSavingAdminProfile(true);
+    try {
+      const updatedUser = await authService.updateProfile(adminActor.id, {
+        name: adminName.trim(),
+        phone: adminPhone.trim(),
+        whatsapp: adminWhatsapp.trim(),
+        cpf: adminCpf.trim()
+      });
+
+      if (adminNewPassword) {
+        await authService.updatePassword(adminNewPassword, adminActor.id);
+        setAdminNewPassword('');
+        setAdminConfirmPassword('');
+        addToast('Senha de acesso atualizada com sucesso!', 'success');
+      }
+
+      onUpdateUser?.(updatedUser);
+      addToast('Perfil do administrador atualizado com sucesso!', 'success');
+    } catch (err: any) {
+      addToast(err.message || 'Erro ao salvar alterações no perfil do administrador.', 'error');
+    } finally {
+      setIsSavingAdminProfile(false);
     }
   };
 
@@ -505,7 +575,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
           { id: 'reports', label: 'Relatórios', icon: FileText },
           { id: 'blocks', label: 'Bloqueios', icon: Ban },
           { id: 'settings', label: 'Configurações', icon: Settings },
-          { id: 'audit', label: 'Auditoria', icon: ShieldAlert }
+          { id: 'audit', label: 'Auditoria', icon: ShieldAlert },
+          { id: 'profile', label: 'Meu Perfil', icon: UserCheck }
         ].map(tab => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -862,22 +933,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-2">
-                  <div className="bg-white p-3.5 rounded-2xl border border-gray-100">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 pt-2">
+                  <div className="bg-white p-3 rounded-2xl border border-gray-100">
                     <span className="text-[10px] font-black uppercase text-gray-400 block">Hora Avulsa</span>
-                    <span className="text-base font-black text-teal-600">R$ {room.hourlyRate.toFixed(2)}</span>
+                    <span className="text-sm font-black text-teal-600">R$ {room.hourlyRate.toFixed(2)}</span>
                   </div>
-                  <div className="bg-white p-3.5 rounded-2xl border border-gray-100">
-                    <span className="text-[10px] font-black uppercase text-gray-400 block">Manhã (07h-12h)</span>
-                    <span className="text-base font-black text-teal-600">R$ {(room.morningRate ?? INITIAL_PERIOD_RATES.MORNING).toFixed(2)}</span>
+                  <div className="bg-white p-3 rounded-2xl border border-gray-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Manhã (5h)</span>
+                    <span className="text-sm font-black text-teal-600">R$ {(room.morningRate ?? INITIAL_PERIOD_RATES.MORNING).toFixed(2)}</span>
                   </div>
-                  <div className="bg-white p-3.5 rounded-2xl border border-gray-100">
-                    <span className="text-[10px] font-black uppercase text-gray-400 block">Tarde (12h-18h)</span>
-                    <span className="text-base font-black text-teal-600">R$ {(room.afternoonRate ?? INITIAL_PERIOD_RATES.AFTERNOON).toFixed(2)}</span>
+                  <div className="bg-white p-3 rounded-2xl border border-gray-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Tarde (6h)</span>
+                    <span className="text-sm font-black text-teal-600">R$ {(room.afternoonRate ?? INITIAL_PERIOD_RATES.AFTERNOON).toFixed(2)}</span>
                   </div>
-                  <div className="bg-white p-3.5 rounded-2xl border border-gray-100">
-                    <span className="text-[10px] font-black uppercase text-gray-400 block">Noite (18h-22h)</span>
-                    <span className="text-base font-black text-teal-600">R$ {(room.nightRate ?? INITIAL_PERIOD_RATES.NIGHT).toFixed(2)}</span>
+                  <div className="bg-white p-3 rounded-2xl border border-gray-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Noite (4h)</span>
+                    <span className="text-sm font-black text-teal-600">R$ {(room.nightRate ?? INITIAL_PERIOD_RATES.NIGHT).toFixed(2)}</span>
+                  </div>
+                  <div className="bg-white p-3 rounded-2xl border border-teal-200 bg-teal-50/50 col-span-2 sm:col-span-1">
+                    <span className="text-[10px] font-black uppercase text-teal-800 block">1 Dia (15h)</span>
+                    <span className="text-sm font-black text-teal-800">R$ {(room.dailyRate ?? room.fullDayRate ?? INITIAL_PERIOD_RATES.FULL_DAY).toFixed(2)}</span>
                   </div>
                 </div>
 
@@ -885,7 +960,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
                   onClick={() => handleOpenRoomModal(room)}
                   className="w-full flex items-center justify-center gap-2 text-xs"
                 >
-                  <Edit2 size={14} /> Editar Tarifas por Períodos & Hora
+                  <Edit2 size={14} /> Editar Tarifas por Períodos & 1 Dia
                 </Button>
               </div>
             ))}
@@ -1609,6 +1684,158 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
         </div>
       )}
 
+      {/* ================= 10. MEU PERFIL DE ADMINISTRADOR ================= */}
+      {activeTab === 'profile' && (
+        <div className="max-w-4xl mx-auto space-y-6">
+          {/* Header do Perfil */}
+          <div className="bg-white rounded-3xl p-6 lg:p-8 border border-gray-100 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <div className="w-16 h-16 rounded-2xl bg-teal-600 flex items-center justify-center text-white text-2xl font-black shadow-md shadow-teal-600/20">
+                {adminName ? adminName.charAt(0).toUpperCase() : 'A'}
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xl font-black text-gray-900">{adminName || 'Administrador'}</h3>
+                  <span className="bg-amber-100 text-amber-800 text-[10px] font-black px-2.5 py-0.5 rounded-full flex items-center gap-1 uppercase tracking-wider">
+                    <ShieldCheck size={12} /> Administrador Master
+                  </span>
+                </div>
+                <p className="text-xs text-gray-500 font-medium mt-0.5">
+                  {currentUser?.email || 'admin@admin.com.br'} • Acesso Irrestrito à Gestão e Finanças
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 text-emerald-700 text-xs font-bold border border-emerald-100">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                Conta Ativa no Sistema
+              </span>
+            </div>
+          </div>
+
+          {/* Formulário de Edição */}
+          <form onSubmit={handleSaveAdminProfile} className="bg-white rounded-3xl p-6 lg:p-8 border border-gray-100 shadow-sm space-y-8">
+            {/* Seção 1: Dados Cadastrais */}
+            <div className="space-y-4">
+              <div className="border-b border-gray-100 pb-3">
+                <h4 className="text-sm font-black text-gray-900 uppercase tracking-wider flex items-center gap-2">
+                  <UserCheck size={16} className="text-teal-600" /> Dados Pessoais & Contato
+                </h4>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Mantenha suas informações cadastrais atualizadas para registros em auditoria e relatórios
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="sm:col-span-2">
+                  <Input
+                    label="Nome Completo *"
+                    value={adminName}
+                    onChange={e => setAdminName(e.target.value)}
+                    placeholder="Ex: Administrador da Clínica"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                    E-mail de Acesso (Login)
+                  </label>
+                  <div className="px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold text-gray-600 flex items-center justify-between">
+                    <span>{currentUser?.email || 'admin@admin.com.br'}</span>
+                    <span className="text-[10px] uppercase font-black text-gray-400 bg-gray-200/60 px-2 py-0.5 rounded-md">
+                      Principal
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    O e-mail principal é utilizado para login no sistema.
+                  </p>
+                </div>
+
+                <div>
+                  <Input
+                    label="CPF"
+                    value={adminCpf}
+                    onChange={e => setAdminCpf(e.target.value)}
+                    placeholder="000.000.000-00"
+                  />
+                </div>
+
+                <div>
+                  <Input
+                    label="Telefone / Celular"
+                    value={adminPhone}
+                    onChange={e => setAdminPhone(e.target.value)}
+                    placeholder="(11) 98765-4321"
+                  />
+                </div>
+
+                <div>
+                  <Input
+                    label="WhatsApp para Contato"
+                    value={adminWhatsapp}
+                    onChange={e => setAdminWhatsapp(e.target.value)}
+                    placeholder="(11) 98765-4321"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Seção 2: Alteração de Senha */}
+            <div className="space-y-4 pt-4 border-t border-gray-100">
+              <div className="border-b border-gray-100 pb-3">
+                <h4 className="text-sm font-black text-gray-900 uppercase tracking-wider flex items-center gap-2">
+                  <Lock size={16} className="text-teal-600" /> Segurança & Senha de Acesso
+                </h4>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Deixe os campos em branco se não desejar alterar a sua senha atual
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <PasswordInput
+                    label="Nova Senha"
+                    value={adminNewPassword}
+                    onChange={e => setAdminNewPassword(e.target.value)}
+                    placeholder="Mínimo 8 caracteres (A-Z, 0-9, símbolos)"
+                    showStrengthMeter={true}
+                  />
+                </div>
+
+                <div>
+                  <PasswordInput
+                    label="Confirmar Nova Senha"
+                    value={adminConfirmPassword}
+                    onChange={e => setAdminConfirmPassword(e.target.value)}
+                    placeholder="Repita a nova senha"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Ações */}
+            <div className="pt-4 border-t border-gray-100 flex flex-col sm:flex-row justify-end items-center gap-3">
+              <Button
+                type="submit"
+                disabled={isSavingAdminProfile}
+                className="w-full sm:w-auto px-8 py-3 text-xs flex items-center justify-center gap-2 shadow-md shadow-teal-600/20"
+              >
+                {isSavingAdminProfile ? (
+                  <>
+                    <RefreshCw size={14} className="animate-spin" /> Salvando Alterações...
+                  </>
+                ) : (
+                  <>
+                    <Check size={16} /> Salvar Alterações do Perfil
+                  </>
+                )}
+              </Button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Modal de Alteração de Pagamento */}
       <Modal
         isOpen={!!bookingToUpdatePayment}
@@ -1808,22 +2035,43 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
                   onChange={e => setEditNightRate(Number(e.target.value))}
                 />
               </div>
+
+              <div className="pt-2 border-t border-gray-100">
+                <Input
+                  label="Período de 1 Dia (07:00 às 22:00 — 15h) (R$)"
+                  type="number"
+                  value={editDailyRate.toString()}
+                  onChange={e => setEditDailyRate(Number(e.target.value))}
+                />
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mt-1">
+                  <p className="text-[10px] text-gray-400">
+                    * Tarifa para locação de 1 dia integral (15h consecutivas).
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setEditDailyRate(editMorningRate + editAfternoonRate + editNightRate)}
+                    className="text-[10px] font-bold text-teal-600 hover:text-teal-700 underline text-left"
+                  >
+                    Usar soma dos 3 turnos (R$ {(editMorningRate + editAfternoonRate + editNightRate).toFixed(2)})
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
           {/* Resumo Dinâmico dos Períodos */}
-          <div className="p-3.5 bg-teal-50 border border-teal-100 rounded-2xl text-xs space-y-1">
+          <div className="p-3.5 bg-teal-50 border border-teal-100 rounded-2xl text-xs space-y-2">
             <span className="font-black text-teal-900 block text-[11px] uppercase tracking-wider">
-              Resumo da Cobrança por Turno:
+              Resumo da Cobrança por Turno & 1 Dia:
             </span>
-            <div className="flex justify-between text-gray-700">
-              <span>Manhã (5h): <strong>R$ {editMorningRate.toFixed(2)}</strong></span>
-              <span>Tarde (6h): <strong>R$ {editAfternoonRate.toFixed(2)}</strong></span>
-              <span>Noite (4h): <strong>R$ {editNightRate.toFixed(2)}</strong></span>
+            <div className="grid grid-cols-3 gap-2 text-gray-700 text-[11px]">
+              <div>Manhã (5h): <strong className="text-teal-900 block">R$ {editMorningRate.toFixed(2)}</strong></div>
+              <div>Tarde (6h): <strong className="text-teal-900 block">R$ {editAfternoonRate.toFixed(2)}</strong></div>
+              <div>Noite (4h): <strong className="text-teal-900 block">R$ {editNightRate.toFixed(2)}</strong></div>
             </div>
-            <div className="pt-1.5 border-t border-teal-200/60 flex justify-between font-black text-teal-900 text-xs">
-              <span>Soma dos 3 Turnos (Diária 15h):</span>
-              <span>R$ {(editMorningRate + editAfternoonRate + editNightRate).toFixed(2)}</span>
+            <div className="pt-2 border-t border-teal-200/60 flex justify-between items-center font-black text-teal-900 text-xs">
+              <span>Período de 1 Dia (15h):</span>
+              <span className="text-sm text-teal-700">R$ {editDailyRate.toFixed(2)}</span>
             </div>
           </div>
 

@@ -34,20 +34,21 @@ export const DAYS_OF_WEEK = [
 ];
 
 export const INITIAL_HOURLY_RATE = 40.0;
-export const INITIAL_DAILY_RATE = 350.0;
+export const INITIAL_DAILY_RATE = 400.0;
 
-// Tarifas padrão por período (Manhã, Tarde e Noite)
+// Tarifas padrão por período (Manhã, Tarde, Noite e 1 Dia Integral)
 export const INITIAL_PERIOD_RATES = {
   MORNING: 150.0,   // Manhã (07:00 às 12:00 - 5h)
   AFTERNOON: 180.0, // Tarde (12:00 às 18:00 - 6h)
   NIGHT: 130.0,     // Noite (18:00 às 22:00 - 4h)
+  FULL_DAY: 400.0,  // 1 Dia / Diária (07:00 às 22:00 - 15h)
 };
 
 import { PeriodShift } from './types';
 
 export interface PeriodConfig {
   id: PeriodShift;
-  name: string; // 'Manhã' | 'Tarde' | 'Noite'
+  name: string; // 'Manhã' | 'Tarde' | 'Noite' | '1 Dia'
   startHour: number;
   endHour: number;
   saturdayEndHour?: number;
@@ -76,6 +77,14 @@ export const BOOKING_PERIODS: PeriodConfig[] = [
     startHour: 18,
     endHour: 22,
     description: '18:00 às 22:00 (Segunda a Sexta)'
+  },
+  {
+    id: 'FULL_DAY',
+    name: '1 Dia',
+    startHour: 7,
+    endHour: 22,
+    saturdayEndHour: 14,
+    description: '07:00 às 22:00 (15h) • Sáb até 14:00 (7h)'
   }
 ];
 

@@ -501,6 +501,9 @@ export const bookingService = {
         totalAmount = isSat ? Math.round(afternoonRate * (2 / 6)) : afternoonRate;
       } else if (periodShift === 'NIGHT') {
         totalAmount = nightRate;
+      } else if (periodShift === 'FULL_DAY') {
+        const isSat = getClosingHourForDate(params.date) === SATURDAY_HOURS_END;
+        totalAmount = isSat ? Math.round(periodRate * (7 / 15)) : periodRate;
       } else {
         totalAmount = periodRate;
       }

@@ -302,6 +302,11 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
     };
 
     if (bookingType === 'PERIOD') {
+      if (bookingPeriodShift === 'FULL_DAY') {
+        const isSat = getClosingHourForDate(bookingDate) === SATURDAY_HOURS_END;
+        const base = room.dailyRate || room.fullDayRate || INITIAL_PERIOD_RATES.FULL_DAY;
+        return isSat ? Math.round(base * (7 / 15)) : base;
+      }
       if (bookingPeriodShift === 'MORNING') {
         return room.morningRate || INITIAL_PERIOD_RATES.MORNING;
       }
@@ -313,7 +318,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
       if (bookingPeriodShift === 'NIGHT') {
         return room.nightRate || INITIAL_PERIOD_RATES.NIGHT;
       }
-      return room.dailyRate || 350;
+      return room.dailyRate || INITIAL_PERIOD_RATES.FULL_DAY;
     }
     return bookingDuration * room.hourlyRate;
   }, [bookingRoom, bookingType, bookingPeriodShift, bookingDuration, bookingDate, rooms]);
@@ -1073,7 +1078,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                     <label className="block text-xs font-black text-gray-700 uppercase tracking-wider">
                       Selecione o Turno Desejado
                     </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
                       {BOOKING_PERIODS.map(p => {
                         const conf = getPeriodConfig(p.id, bookingDate);
                         const isSelected = bookingPeriodShift === p.id;
@@ -1084,8 +1089,11 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                         else if (p.id === 'AFTERNOON') {
                           const base = roomObj?.afternoonRate || INITIAL_PERIOD_RATES.AFTERNOON;
                           rate = isSaturday ? Math.round(base * (2 / 6)) : base;
-                        } else {
+                        } else if (p.id === 'NIGHT') {
                           rate = roomObj?.nightRate || INITIAL_PERIOD_RATES.NIGHT;
+                        } else {
+                          const base = roomObj?.dailyRate || roomObj?.fullDayRate || INITIAL_PERIOD_RATES.FULL_DAY;
+                          rate = isSaturday ? Math.round(base * (7 / 15)) : base;
                         }
 
                         return (
@@ -1108,7 +1116,15 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                               <div className={`p-2 rounded-xl ${
                                 isSelected ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-500'
                               }`}>
-                                {p.id === 'MORNING' ? <Sunrise size={18} /> : p.id === 'AFTERNOON' ? <Sun size={18} /> : <Moon size={18} />}
+                                {p.id === 'MORNING' ? (
+                                  <Sunrise size={18} />
+                                ) : p.id === 'AFTERNOON' ? (
+                                  <Sun size={18} />
+                                ) : p.id === 'NIGHT' ? (
+                                  <Moon size={18} />
+                                ) : (
+                                  <CalendarIcon size={18} />
+                                )}
                               </div>
                               <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
                                 isSelected ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-700'

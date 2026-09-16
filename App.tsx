@@ -11,7 +11,7 @@ import { ToastProvider, useToast } from './components/Toast';
 import { 
   Building2, Calendar as CalendarIcon, LayoutDashboard, 
   Users, DollarSign, FileText, Settings, LogOut, 
-  Menu, X, User as UserIcon, Shield, ChevronDown
+  Menu, X, User as UserIcon, Shield, ChevronDown, UserCheck
 } from 'lucide-react';
 
 export type AppView = 
@@ -173,6 +173,7 @@ const AppContent: React.FC = () => {
     { id: 'admin' as AppView, label: 'Painel Geral', icon: LayoutDashboard },
     { id: 'calendar' as AppView, label: 'Agenda Completa', icon: CalendarIcon },
     { id: 'clients' as AppView, label: 'Pacientes', icon: Users },
+    { id: 'profile' as AppView, label: 'Meu Perfil', icon: UserCheck },
   ];
 
   const currentNavItems = isAdmin ? adminNavItems : professionalNavItems;
@@ -230,8 +231,8 @@ const AppContent: React.FC = () => {
           {/* User Profile Info & Controls */}
           <div className="flex items-center gap-3 sm:gap-4">
             <div 
-              onClick={() => !isAdmin && setCurrentView('profile')}
-              className={`hidden sm:flex items-center gap-3 px-3 py-1.5 rounded-2xl border border-gray-100 bg-gray-50/50 ${!isAdmin ? 'cursor-pointer hover:bg-teal-50/50 hover:border-teal-200' : ''} transition-all`}
+              onClick={() => setCurrentView('profile')}
+              className="hidden sm:flex items-center gap-3 px-3 py-1.5 rounded-2xl border border-gray-100 bg-gray-50/50 cursor-pointer hover:bg-teal-50/50 hover:border-teal-200 transition-all"
             >
               <div className="w-8 h-8 rounded-xl bg-teal-100 text-teal-800 font-black text-xs flex items-center justify-center">
                 {currentUser.name.charAt(0)}
@@ -359,15 +360,26 @@ const AppContent: React.FC = () => {
         )}
 
         {currentView === 'profile' && (
-          <UserDashboard 
-            user={currentUser} 
-            initialTab="profile" 
-            onNavigateToCalendar={() => setCurrentView('calendar')} 
-          />
+          isAdmin ? (
+            <AdminPanel 
+              currentUser={currentUser} 
+              onUpdateUser={setCurrentUser} 
+              initialTab="profile" 
+            />
+          ) : (
+            <UserDashboard 
+              user={currentUser} 
+              initialTab="profile" 
+              onNavigateToCalendar={() => setCurrentView('calendar')} 
+            />
+          )
         )}
 
         {currentView === 'admin' && (
-          <AdminPanel currentUser={currentUser} />
+          <AdminPanel 
+            currentUser={currentUser} 
+            onUpdateUser={setCurrentUser} 
+          />
         )}
       </main>
 

@@ -33,14 +33,15 @@ export interface Client {
 
 export type RoomId = 'Sala 1' | 'Sala 2';
 
-export type PeriodShift = 'MORNING' | 'AFTERNOON' | 'NIGHT';
+export type PeriodShift = 'MORNING' | 'AFTERNOON' | 'NIGHT' | 'FULL_DAY';
 
 export interface Room {
   id: RoomId;
   name: string;
   description: string;
   hourlyRate: number;
-  dailyRate: number; // Tarifa legada ou integral
+  dailyRate: number; // Tarifa para o período de 1 dia (07h às 22h - Diária Integral)
+  fullDayRate?: number; // Tarifa para o período de 1 dia (07h às 22h)
   morningRate?: number; // Tarifa para o período da manhã (07h às 12h)
   afternoonRate?: number; // Tarifa para o período da tarde (12h às 18h)
   nightRate?: number; // Tarifa para o período da noite (18h às 22h)
