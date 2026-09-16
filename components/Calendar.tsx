@@ -277,7 +277,8 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
       await bookingService.cancelBooking(selectedBooking.id, {
         id: user.id,
         name: user.name,
-        role: user.role
+        role: user.role,
+        email: user.email
       });
       addToast('Reserva cancelada com sucesso.', 'success');
       setIsDetailsModalOpen(false);

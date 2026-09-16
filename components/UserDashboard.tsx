@@ -205,7 +205,8 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
       await bookingService.cancelBooking(bookingToCancel.id, {
         id: user.id,
         name: user.name,
-        role: user.role
+        role: user.role,
+        email: user.email
       });
       addToast('Locação cancelada com sucesso.', 'success');
       setBookingToCancel(null);

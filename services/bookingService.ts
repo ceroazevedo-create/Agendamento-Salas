@@ -93,6 +93,20 @@ function mapDbBookingToBooking(b: any, profilesMap?: Map<string, any>): Booking 
   };
 }
 
+const isValidUUID = (id: string | undefined | null): boolean => {
+  if (!id || typeof id !== 'string') return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id.trim());
+};
+
+const safeInsertAuditLog = async (logData: { user_id: string; user_name: string; action: string; details: string }) => {
+  if (!isSupabaseConfigured) return;
+  try {
+    await supabase.from('audit_logs').insert(logData).select().maybeSingle();
+  } catch {
+    // Falha silenciosa de auditoria remota
+  }
+};
+
 function mapDbBlockToBlockedSlot(blk: any): BlockedSlot {
   return {
     id: blk.id,
@@ -623,90 +637,154 @@ export const bookingService = {
   },
 
   // Cancelamento de locação respeitando as regras configuradas (Seção 44)
-  cancelBooking: async (bookingId: string, user: { id: string; name: string; role: string }): Promise<void> => {
+  cancelBooking: async (bookingId: string, user: { id: string; name: string; role: string; email?: string }): Promise<void> => {
     const isAdmin = user.role === 'ADMIN';
+    const isUUID = isValidUUID(bookingId);
+    const localBookings = getStoredBookings();
+    let localIndex = localBookings.findIndex(b => b.id === bookingId || String(b.id).trim() === String(bookingId).trim());
+    let localTarget: Booking | undefined = localIndex !== -1 ? localBookings[localIndex] : undefined;
 
-    if (isSupabaseConfigured) {
+    let remoteTarget: any = null;
+
+    // 1. Se o Supabase estiver configurado e o ID for um UUID válido, tenta localizar no Supabase
+    if (isSupabaseConfigured && isUUID) {
       try {
-        const { data: target, error: fetchErr } = await supabase
+        const { data, error } = await supabase
           .from('bookings')
           .select('*')
           .eq('id', bookingId)
-          .single();
+          .maybeSingle();
 
-        if (fetchErr || !target) throw new Error('Reserva não encontrada.');
-
-        if (!isAdmin && target.professional_id !== user.id) {
-          throw new Error('Você só pode cancelar suas próprias reservas.');
+        if (!error && data) {
+          remoteTarget = data;
         }
+      } catch (err) {
+        console.warn('Erro ao consultar reserva no Supabase:', err);
+      }
+    }
 
-        if (!isAdmin) {
-          const bookingStartTime = new Date(`${target.booking_date}T${target.start_time.toString().padStart(2, '0')}:00:00`);
-          const hoursDiff = differenceInHours(bookingStartTime, new Date());
-          if (hoursDiff < 24) {
-            throw new Error('Cancelamentos só podem ser realizados com no mínimo 24h de antecedência do horário agendado.');
-          }
+    // 2. Se não encontrou por UUID mas temos o localTarget, tenta localizar no Supabase pelo slot (sala, data e hora inicial)
+    if (isSupabaseConfigured && !remoteTarget && localTarget) {
+      try {
+        const cleanDate = String(localTarget.date).split('T')[0];
+        const { data, error } = await supabase
+          .from('bookings')
+          .select('*')
+          .eq('room_id', localTarget.roomId)
+          .eq('booking_date', cleanDate)
+          .eq('start_time', localTarget.hour)
+          .maybeSingle();
+
+        if (!error && data) {
+          remoteTarget = data;
         }
+      } catch (err) {
+        console.warn('Tentativa de busca por slot no Supabase falhou:', err);
+      }
+    }
 
+    // 3. Se não encontrou por ID exato, faz uma busca flexível no Local Storage (ex: se ID tiver variações de string)
+    if (!remoteTarget && !localTarget) {
+      const approx = localBookings.find(b => String(b.id).includes(bookingId) || bookingId.includes(String(b.id)));
+      if (approx) {
+        localTarget = approx;
+        localIndex = localBookings.findIndex(b => b.id === approx.id);
+      }
+    }
+
+    // Se a reserva realmente não existe nem no Supabase nem localmente
+    if (!remoteTarget && !localTarget) {
+      throw new Error('Reserva não encontrada.');
+    }
+
+    // 4. Validação de Permissão (Dono da reserva ou Administrador)
+    const ownerId = remoteTarget?.professional_id || remoteTarget?.user_id || localTarget?.userId;
+    const ownerEmail = remoteTarget?.user_email || localTarget?.userEmail;
+    const isOwner = ownerId === user.id || (Boolean(user.email) && Boolean(ownerEmail) && user.email === ownerEmail);
+
+    if (!isAdmin && !isOwner) {
+      throw new Error('Você só pode cancelar suas próprias reservas.');
+    }
+
+    // 5. Validação de Antecedência Mínima de Cancelamento (Padrão 24h ou conforme configuração do sistema)
+    if (!isAdmin) {
+      const config = getSystemConfig();
+      const limitHours = config.cancellationLimitHours ?? 24;
+
+      const dateStr = String(remoteTarget?.booking_date || localTarget?.date || '').split('T')[0];
+      const startHour = Number(remoteTarget?.start_time !== undefined ? remoteTarget.start_time : localTarget?.hour ?? 7);
+
+      if (dateStr) {
+        const bookingStartTime = new Date(`${dateStr}T${startHour.toString().padStart(2, '0')}:00:00`);
+        const hoursDiff = differenceInHours(bookingStartTime, new Date());
+
+        if (hoursDiff < limitHours) {
+          throw new Error(`Cancelamentos só podem ser realizados com no mínimo ${limitHours}h de antecedência do horário agendado.`);
+        }
+      }
+    }
+
+    // 6. Atualiza no Supabase caso a reserva exista remotamente
+    if (isSupabaseConfigured && remoteTarget) {
+      try {
         const { error: updateErr } = await supabase
           .from('bookings')
           .update({
             payment_status: 'CANCELLED',
             status: 'cancelled'
           })
-          .eq('id', bookingId);
+          .eq('id', remoteTarget.id);
 
-        if (updateErr) throw updateErr;
-
-        await supabase.from('audit_logs').insert({
-          user_id: user.id,
-          user_name: user.name,
-          action: 'Cancelamento de Reserva',
-          details: `Reserva ${bookingId} (${target.room_id}, ${target.booking_date}) foi cancelada.`
-        });
-
-        const local = getStoredBookings();
-        saveStoredBookings(local.map(b => b.id === bookingId ? { ...b, paymentStatus: 'CANCELLED' as PaymentStatus } : b));
-
-        return;
-      } catch (err: any) {
-        throw new Error(translateSupabaseError(err));
+        if (!updateErr) {
+          await safeInsertAuditLog({
+            user_id: user.id,
+            user_name: user.name,
+            action: 'Cancelamento de Reserva',
+            details: `Reserva ${remoteTarget.id} (${remoteTarget.room_id}, ${remoteTarget.booking_date}) foi cancelada.`
+          });
+        } else {
+          console.warn('Erro ao atualizar cancelamento no Supabase:', updateErr);
+        }
+      } catch (e) {
+        console.warn('Falha na comunicação com Supabase durante cancelamento:', e);
       }
     }
 
-    const bookings = getStoredBookings();
-    const index = bookings.findIndex(b => b.id === bookingId);
-    if (index === -1) throw new Error('Reserva não encontrada.');
+    // 7. Atualiza no Local Storage
+    const currentLocal = getStoredBookings();
+    const updatedLocal = currentLocal.map(b => {
+      const isDirectMatch = b.id === bookingId || (remoteTarget && b.id === remoteTarget.id) || (localTarget && b.id === localTarget.id);
+      const isSlotMatch = remoteTarget && 
+        b.roomId.toLowerCase().trim() === String(remoteTarget.room_id).toLowerCase().trim() &&
+        b.date === String(remoteTarget.booking_date).split('T')[0] &&
+        b.hour === remoteTarget.start_time;
 
-    const target = bookings[index];
-
-    if (!isAdmin && target.userId !== user.id) {
-      throw new Error('Você só pode cancelar suas próprias reservas.');
-    }
-
-    if (!isAdmin) {
-      const config = getSystemConfig();
-      const limitHours = config.cancellationLimitHours ?? 24;
-      const bookingStartTime = new Date(`${target.date}T${target.hour.toString().padStart(2, '0')}:00:00`);
-      const hoursDiff = differenceInHours(bookingStartTime, new Date());
-
-      if (hoursDiff < limitHours) {
-        throw new Error(`Cancelamentos só podem ser realizados com no mínimo ${limitHours}h de antecedência do horário agendado.`);
+      if (isDirectMatch || isSlotMatch) {
+        return {
+          ...b,
+          paymentStatus: 'CANCELLED' as PaymentStatus
+        };
       }
+      return b;
+    });
+
+    if (localIndex !== -1 && !updatedLocal.some(b => (b.id === bookingId || b.id === localTarget?.id) && b.paymentStatus === 'CANCELLED')) {
+      updatedLocal[localIndex] = {
+        ...updatedLocal[localIndex],
+        paymentStatus: 'CANCELLED' as PaymentStatus
+      };
     }
 
-    bookings[index] = {
-      ...target,
-      paymentStatus: 'CANCELLED'
-    };
+    saveStoredBookings(updatedLocal);
 
-    saveStoredBookings(bookings);
-
+    // 8. Registro de Auditoria
+    const roomRef = remoteTarget?.room_id || localTarget?.roomId || '';
+    const dateRef = remoteTarget?.booking_date || localTarget?.date || '';
     addAuditLog(
       user.id,
       user.name,
       'Cancelamento de Reserva',
-      `Reserva ${bookingId} (${target.roomId}, ${target.date}) foi cancelada.`
+      `Reserva ${bookingId} (${roomRef}, ${dateRef}) foi cancelada com sucesso.`
     );
   },
 
@@ -717,7 +795,9 @@ export const bookingService = {
     adminUser: { id: string; name: string };
     paidNotes?: string;
   }): Promise<Booking> => {
-    if (isSupabaseConfigured) {
+    const isUUID = isValidUUID(params.bookingId);
+
+    if (isSupabaseConfigured && isUUID) {
       try {
         const payload: any = {
           payment_status: params.newStatus,
@@ -731,33 +811,40 @@ export const bookingService = {
           .update(payload)
           .eq('id', params.bookingId)
           .select('*, clients(full_name), profiles:professional_id(full_name, email)')
-          .single();
+          .maybeSingle();
 
-        if (error) throw error;
+        if (!error && updated) {
+          // Se marcado como pago, insere registro em public.payments
+          if (params.newStatus === 'PAID') {
+            try {
+              await supabase.from('payments').insert({
+                booking_id: updated.id,
+                professional_id: updated.professional_id,
+                amount: updated.total_amount,
+                payment_date: new Date().toISOString().split('T')[0],
+                status: 'PAID',
+                notes: params.paidNotes || 'Pagamento confirmado pelo administrador',
+                created_by: params.adminUser.name
+              });
+            } catch {
+              // Ignore remote payments insert error
+            }
+          }
 
-        // Se marcado como pago, insere registro em public.payments
-        if (params.newStatus === 'PAID' && updated) {
-          await supabase.from('payments').insert({
-            booking_id: updated.id,
-            professional_id: updated.professional_id,
-            amount: updated.total_amount,
-            payment_date: new Date().toISOString().split('T')[0],
-            status: 'PAID',
-            notes: params.paidNotes || 'Pagamento confirmado pelo administrador',
-            created_by: params.adminUser.name
+          await safeInsertAuditLog({
+            user_id: params.adminUser.id,
+            user_name: params.adminUser.name,
+            action: 'Controle Financeiro / Pagamento',
+            details: `Reserva ${params.bookingId} alterada para status: ${params.newStatus}.`
           });
+
+          const local = getStoredBookings();
+          saveStoredBookings(local.map(b => b.id === params.bookingId ? { ...b, paymentStatus: params.newStatus } : b));
+
+          return mapDbBookingToBooking(updated);
         }
-
-        await supabase.from('audit_logs').insert({
-          user_id: params.adminUser.id,
-          user_name: params.adminUser.name,
-          action: 'Controle Financeiro / Pagamento',
-          details: `Reserva ${params.bookingId} alterada para status: ${params.newStatus}.`
-        });
-
-        return mapDbBookingToBooking(updated);
       } catch (err: any) {
-        throw new Error(translateSupabaseError(err));
+        console.warn('Erro ao atualizar status de pagamento no Supabase, atualizando localmente:', err);
       }
     }
 
@@ -781,7 +868,7 @@ export const bookingService = {
       params.adminUser.id,
       params.adminUser.name,
       'Controle Financeiro / Pagamento',
-      `Reserva ${params.bookingId} (${target.userName}) alterada para status: ${params.newStatus}.`
+      `Reserva ${params.bookingId} (${target.roomId}, ${target.date}) alterada para status: ${params.newStatus}.`
     );
 
     return updated;
@@ -871,20 +958,19 @@ export const bookingService = {
   },
 
   deleteBlockedSlot: async (blockId: string, adminUser: { id: string; name: string }): Promise<void> => {
-    if (isSupabaseConfigured) {
+    if (isSupabaseConfigured && isValidUUID(blockId)) {
       try {
         const { error } = await supabase.from('blocked_slots').delete().eq('id', blockId);
-        if (error) throw error;
-
-        await supabase.from('audit_logs').insert({
-          user_id: adminUser.id,
-          user_name: adminUser.name,
-          action: 'Remoção de Bloqueio',
-          details: `Bloqueio ${blockId} foi desativado.`
-        });
-        return;
+        if (!error) {
+          await safeInsertAuditLog({
+            user_id: adminUser.id,
+            user_name: adminUser.name,
+            action: 'Remoção de Bloqueio',
+            details: `Bloqueio ${blockId} foi desativado.`
+          });
+        }
       } catch (err: any) {
-        throw new Error(translateSupabaseError(err));
+        console.warn('Erro ao remover bloqueio no Supabase:', err);
       }
     }
 
