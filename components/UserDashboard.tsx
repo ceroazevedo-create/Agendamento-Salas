@@ -565,8 +565,24 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                         <td className="py-4 px-6 text-gray-500">
                           {b.durationHours}h {b.type === 'PERIOD' ? `(${b.periodName ? `Período ${b.periodName}` : 'Período'})` : ''}
                         </td>
-                        <td className="py-4 px-6 font-black text-gray-900 text-right">
-                          R$ {b.totalAmount.toFixed(2)}
+                        <td className="py-4 px-6 text-right font-black">
+                          {b.paymentStatus === 'CANCELLED' ? (
+                            <div className="flex flex-col items-end">
+                              <span className="text-gray-400 line-through text-[11px] font-semibold">
+                                R$ {b.totalAmount.toFixed(2)}
+                              </span>
+                              <span className="text-red-600 text-xs font-black">
+                                R$ 0,00
+                              </span>
+                              <span className="text-[9px] font-bold text-gray-400 uppercase tracking-tight">
+                                Não cobrado
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-gray-900">
+                              R$ {b.totalAmount.toFixed(2)}
+                            </span>
+                          )}
                         </td>
                         <td className="py-4 px-6 text-center">
                           <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ${
@@ -576,7 +592,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                               ? 'bg-red-100 text-red-700'
                               : 'bg-amber-100 text-amber-800'
                           }`}>
-                            {b.paymentStatus === 'PAID' ? 'Pago' : b.paymentStatus === 'CANCELLED' ? 'Cancelado' : 'Pendente'}
+                            {b.paymentStatus === 'PAID' ? 'Pago' : b.paymentStatus === 'CANCELLED' ? 'Cancelado (Sem Cobrança)' : 'Pendente'}
                           </span>
                         </td>
                         <td className="py-4 px-6 text-right">

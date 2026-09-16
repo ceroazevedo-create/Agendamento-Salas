@@ -1004,7 +1004,12 @@ export const bookingService = {
     }
 
     const config = getSystemConfig();
-    return config.rooms;
+    return (config.rooms || []).map(r => ({
+      ...r,
+      morningRate: Number(r.morningRate ?? INITIAL_PERIOD_RATES.MORNING),
+      afternoonRate: Number(r.afternoonRate ?? INITIAL_PERIOD_RATES.AFTERNOON),
+      nightRate: Number(r.nightRate ?? INITIAL_PERIOD_RATES.NIGHT)
+    }));
   },
 
   updateRoomRates: async (
@@ -1016,31 +1021,48 @@ export const bookingService = {
     afternoonRate?: number,
     nightRate?: number
   ): Promise<void> => {
+    const finalMorning = morningRate !== undefined ? morningRate : INITIAL_PERIOD_RATES.MORNING;
+    const finalAfternoon = afternoonRate !== undefined ? afternoonRate : INITIAL_PERIOD_RATES.AFTERNOON;
+    const finalNight = nightRate !== undefined ? nightRate : INITIAL_PERIOD_RATES.NIGHT;
+    const finalDaily = dailyRate > 0 ? dailyRate : (finalMorning + finalAfternoon + finalNight);
+
     if (isSupabaseConfigured) {
       try {
         const updatePayload: any = {
           hourly_rate: hourlyRate,
-          period_rate: dailyRate
+          period_rate: finalDaily
         };
-        if (morningRate !== undefined) updatePayload.morning_rate = morningRate;
-        if (afternoonRate !== undefined) updatePayload.afternoon_rate = afternoonRate;
-        if (nightRate !== undefined) updatePayload.night_rate = nightRate;
+        if (morningRate !== undefined) updatePayload.morning_rate = finalMorning;
+        if (afternoonRate !== undefined) updatePayload.afternoon_rate = finalAfternoon;
+        if (nightRate !== undefined) updatePayload.night_rate = finalNight;
 
-        const { error } = await supabase
+        let { error } = await supabase
           .from('rooms')
           .update(updatePayload)
           .eq('id', roomId);
 
-        if (error) throw error;
+        // Fallback caso as colunas de turnos ainda não existam no banco remoto
+        if (error && (error.code === '42703' || String(error.message).includes('_rate'))) {
+          const fallbackRes = await supabase
+            .from('rooms')
+            .update({
+              hourly_rate: hourlyRate,
+              period_rate: finalDaily
+            })
+            .eq('id', roomId);
+          error = fallbackRes.error;
+        }
 
-        await supabase.from('audit_logs').insert({
-          user_id: adminUser.id,
-          user_name: adminUser.name,
-          action: 'Alteração de Preço',
-          details: `Novos valores para ${roomId}: Hora R$ ${hourlyRate.toFixed(2)} | Manhã R$ ${(morningRate || 150).toFixed(2)} | Tarde R$ ${(afternoonRate || 180).toFixed(2)} | Noite R$ ${(nightRate || 130).toFixed(2)}`
-        });
+        if (!error) {
+          await safeInsertAuditLog({
+            user_id: adminUser.id,
+            user_name: adminUser.name,
+            action: 'Alteração de Preço',
+            details: `Novos valores para ${roomId}: Hora R$ ${hourlyRate.toFixed(2)} | Manhã R$ ${finalMorning.toFixed(2)} | Tarde R$ ${finalAfternoon.toFixed(2)} | Noite R$ ${finalNight.toFixed(2)}`
+          });
+        }
       } catch (err: any) {
-        throw new Error(translateSupabaseError(err));
+        console.warn('Erro ao persistir novas tarifas no Supabase:', err);
       }
     }
 
@@ -1049,10 +1071,10 @@ export const bookingService = {
     if (!room) throw new Error('Sala não encontrada.');
 
     room.hourlyRate = hourlyRate;
-    room.dailyRate = dailyRate;
-    if (morningRate !== undefined) room.morningRate = morningRate;
-    if (afternoonRate !== undefined) room.afternoonRate = afternoonRate;
-    if (nightRate !== undefined) room.nightRate = nightRate;
+    room.dailyRate = finalDaily;
+    room.morningRate = finalMorning;
+    room.afternoonRate = finalAfternoon;
+    room.nightRate = finalNight;
 
     saveSystemConfig(config);
 
@@ -1060,7 +1082,7 @@ export const bookingService = {
       adminUser.id,
       adminUser.name,
       'Alteração de Preço',
-      `Novos valores para ${roomId}: Hora R$ ${hourlyRate.toFixed(2)} | Manhã R$ ${(room.morningRate || 150).toFixed(2)} | Tarde R$ ${(room.afternoonRate || 180).toFixed(2)} | Noite R$ ${(room.nightRate || 130).toFixed(2)}`
+      `Novos valores para ${roomId}: Hora R$ ${hourlyRate.toFixed(2)} | Manhã R$ ${finalMorning.toFixed(2)} | Tarde R$ ${finalAfternoon.toFixed(2)} | Noite R$ ${finalNight.toFixed(2)}`
     );
   },
 

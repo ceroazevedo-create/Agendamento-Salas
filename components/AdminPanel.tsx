@@ -4,7 +4,7 @@ import { bookingService } from '../services/bookingService';
 import { authService } from '../services/authService';
 import { clientService } from '../services/clientService';
 import { getStoredAuditLogs, getSystemConfig, saveSystemConfig } from '../services/storageService';
-import { INITIAL_HOURLY_RATE, INITIAL_DAILY_RATE, getClosingHourForDate, SATURDAY_HOURS_END } from '../constants';
+import { INITIAL_HOURLY_RATE, INITIAL_DAILY_RATE, INITIAL_PERIOD_RATES, getClosingHourForDate, SATURDAY_HOURS_END } from '../constants';
 import { Button } from './Button';
 import { Modal } from './Modal';
 import { Input } from './Input';
@@ -81,7 +81,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
   // Edit Room Modal
   const [editingRoom, setEditingRoom] = useState<Room | null>(null);
   const [editHourlyRate, setEditHourlyRate] = useState<number>(40);
-  const [editDailyRate, setEditDailyRate] = useState<number>(350);
+  const [editDailyRate, setEditDailyRate] = useState<number>(460);
+  const [editMorningRate, setEditMorningRate] = useState<number>(INITIAL_PERIOD_RATES.MORNING);
+  const [editAfternoonRate, setEditAfternoonRate] = useState<number>(INITIAL_PERIOD_RATES.AFTERNOON);
+  const [editNightRate, setEditNightRate] = useState<number>(INITIAL_PERIOD_RATES.NIGHT);
   const [isUpdatingRates, setIsUpdatingRates] = useState(false);
 
   // Delete Professional State (Exclusão no menu Configurações)
@@ -195,18 +198,44 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
     }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [bookings, selectedMonth, selectedProfId, selectedRoomFilter, selectedStatusFilter]);
 
+  // Consolidated Financial Summary (Cobrança consolidada do mês - agendamentos cancelados desconsiderados)
+  const financialSummary = useMemo(() => {
+    const active = filteredFinancialBookings.filter(b => b.paymentStatus !== 'CANCELLED');
+    const cancelled = filteredFinancialBookings.filter(b => b.paymentStatus === 'CANCELLED');
+
+    const totalToBill = active.reduce((acc, b) => acc + b.totalAmount, 0);
+    const totalPaid = active.filter(b => b.paymentStatus === 'PAID').reduce((acc, b) => acc + b.totalAmount, 0);
+    const totalPending = active.filter(b => b.paymentStatus === 'PENDING').reduce((acc, b) => acc + b.totalAmount, 0);
+    const totalActiveHours = active.reduce((acc, b) => acc + (b.durationHours || 1), 0);
+    const totalCancelledDisregarded = cancelled.reduce((acc, b) => acc + b.totalAmount, 0);
+
+    return {
+      activeCount: active.length,
+      cancelledCount: cancelled.length,
+      totalActiveHours,
+      totalToBill,
+      totalPaid,
+      totalPending,
+      totalCancelledDisregarded
+    };
+  }, [filteredFinancialBookings]);
+
   // Selected Professional Summary
   const selectedProfStats = useMemo(() => {
     if (selectedProfId === 'ALL') return null;
     const profBookings = filteredFinancialBookings.filter(b => b.paymentStatus !== 'CANCELLED');
+    const cancelledBookings = filteredFinancialBookings.filter(b => b.paymentStatus === 'CANCELLED');
     const totalDue = profBookings.reduce((sum, b) => sum + b.totalAmount, 0);
     const totalPaid = profBookings.filter(b => b.paymentStatus === 'PAID').reduce((sum, b) => sum + b.totalAmount, 0);
     const totalHours = profBookings.reduce((sum, b) => sum + (b.durationHours || 1), 0);
+    const cancelledAmount = cancelledBookings.reduce((sum, b) => sum + b.totalAmount, 0);
     const profObj = users.find(u => u.id === selectedProfId);
 
     return {
       name: profObj?.name || 'Profissional',
       count: profBookings.length,
+      cancelledCount: cancelledBookings.length,
+      cancelledAmount,
       hours: totalHours,
       totalDue,
       totalPaid,
@@ -298,20 +327,34 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
   const handleOpenRoomModal = (room: Room) => {
     setEditingRoom(room);
     setEditHourlyRate(room.hourlyRate);
-    setEditDailyRate(room.dailyRate);
+    const mRate = Number(room.morningRate ?? INITIAL_PERIOD_RATES.MORNING);
+    const aRate = Number(room.afternoonRate ?? INITIAL_PERIOD_RATES.AFTERNOON);
+    const nRate = Number(room.nightRate ?? INITIAL_PERIOD_RATES.NIGHT);
+    setEditMorningRate(mRate);
+    setEditAfternoonRate(aRate);
+    setEditNightRate(nRate);
+    setEditDailyRate(room.dailyRate || (mRate + aRate + nRate));
   };
 
   const handleSaveRoomRates = async () => {
     if (!editingRoom) return;
+    if (editHourlyRate <= 0) return addToast('O valor da hora deve ser maior que zero.', 'error');
+    if (editMorningRate <= 0 || editAfternoonRate <= 0 || editNightRate <= 0) {
+      return addToast('Os valores dos períodos (manhã, tarde e noite) devem ser maiores que zero.', 'error');
+    }
     setIsUpdatingRates(true);
     try {
+      const calculatedDaily = editDailyRate > 0 ? editDailyRate : (editMorningRate + editAfternoonRate + editNightRate);
       await bookingService.updateRoomRates(
         editingRoom.id,
         editHourlyRate,
-        editDailyRate,
-        adminActor
+        calculatedDaily,
+        adminActor,
+        editMorningRate,
+        editAfternoonRate,
+        editNightRate
       );
-      addToast(`Valores da ${editingRoom.id} atualizados com sucesso!`, 'success');
+      addToast(`Tarifas por períodos da ${editingRoom.id} atualizadas com sucesso!`, 'success');
       setEditingRoom(null);
       await loadAdminData();
     } catch (err: any) {
@@ -414,21 +457,31 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
     doc.text('LocaPsico — Relatório Administrativo Mensal', 14, 20);
     doc.setFontSize(11);
     doc.text(`Mês de Referência: ${selectedMonth}`, 14, 28);
-    doc.text(`Total Faturado: R$ ${totalMonthlyRevenue.toFixed(2)} | Recebido: R$ ${totalMonthlyPaid.toFixed(2)} | Pendente: R$ ${totalMonthlyPending.toFixed(2)}`, 14, 34);
+    doc.text(`Cobrança do Mês: R$ ${financialSummary.totalToBill.toFixed(2)} | Recebido: R$ ${financialSummary.totalPaid.toFixed(2)} | Pendente: R$ ${financialSummary.totalPending.toFixed(2)}`, 14, 34);
 
-    const rows = filteredFinancialBookings.map(b => [
-      format(parseISO(b.date), 'dd/MM/yyyy'),
-      b.roomId,
-      b.userName || 'N/A',
-      b.clientName || 'N/A',
-      `${b.hour}:00 - ${b.endTimeHour}:00`,
-      `${b.durationHours}h`,
-      `R$ ${b.totalAmount.toFixed(2)}`,
-      b.paymentStatus === 'PAID' ? 'Pago' : b.paymentStatus === 'CANCELLED' ? 'Cancelado' : 'Pendente'
-    ]);
+    if (financialSummary.cancelledCount > 0) {
+      doc.setFontSize(9);
+      doc.setTextColor(180, 50, 50);
+      doc.text(`* ${financialSummary.cancelledCount} agendamento(s) cancelado(s) desconsiderado(s) da cobrança (R$ 0,00 cobrado).`, 14, 40);
+      doc.setTextColor(0, 0, 0);
+    }
+
+    const rows = filteredFinancialBookings.map(b => {
+      const isCancelled = b.paymentStatus === 'CANCELLED';
+      return [
+        format(parseISO(b.date), 'dd/MM/yyyy'),
+        b.roomId,
+        b.userName || 'N/A',
+        b.clientName || 'N/A',
+        `${b.hour.toString().padStart(2, '0')}:00 - ${b.endTimeHour.toString().padStart(2, '0')}:00`,
+        isCancelled ? `0h (${b.durationHours}h canc.)` : `${b.durationHours}h`,
+        isCancelled ? 'R$ 0,00 (Isento)' : `R$ ${b.totalAmount.toFixed(2)}`,
+        b.paymentStatus === 'PAID' ? 'Pago' : isCancelled ? 'Cancelado (Sem Cobrança)' : 'Pendente'
+      ];
+    });
 
     autoTable(doc, {
-      startY: 42,
+      startY: financialSummary.cancelledCount > 0 ? 44 : 40,
       head: [['Data', 'Sala', 'Profissional', 'Paciente', 'Horário', 'Horas', 'Valor', 'Status']],
       body: rows,
       theme: 'grid',
@@ -809,14 +862,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 pt-2">
-                  <div className="bg-white p-4 rounded-2xl border border-gray-100">
-                    <span className="text-[10px] font-black uppercase text-gray-400 block">Tarifa por Hora</span>
-                    <span className="text-xl font-black text-teal-600">R$ {room.hourlyRate.toFixed(2)}</span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-2">
+                  <div className="bg-white p-3.5 rounded-2xl border border-gray-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Hora Avulsa</span>
+                    <span className="text-base font-black text-teal-600">R$ {room.hourlyRate.toFixed(2)}</span>
                   </div>
-                  <div className="bg-white p-4 rounded-2xl border border-gray-100">
-                    <span className="text-[10px] font-black uppercase text-gray-400 block">Tarifa Período (15h)</span>
-                    <span className="text-xl font-black text-teal-600">R$ {room.dailyRate.toFixed(2)}</span>
+                  <div className="bg-white p-3.5 rounded-2xl border border-gray-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Manhã (07h-12h)</span>
+                    <span className="text-base font-black text-teal-600">R$ {(room.morningRate ?? INITIAL_PERIOD_RATES.MORNING).toFixed(2)}</span>
+                  </div>
+                  <div className="bg-white p-3.5 rounded-2xl border border-gray-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Tarde (12h-18h)</span>
+                    <span className="text-base font-black text-teal-600">R$ {(room.afternoonRate ?? INITIAL_PERIOD_RATES.AFTERNOON).toFixed(2)}</span>
+                  </div>
+                  <div className="bg-white p-3.5 rounded-2xl border border-gray-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Noite (18h-22h)</span>
+                    <span className="text-base font-black text-teal-600">R$ {(room.nightRate ?? INITIAL_PERIOD_RATES.NIGHT).toFixed(2)}</span>
                   </div>
                 </div>
 
@@ -824,7 +885,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
                   onClick={() => handleOpenRoomModal(room)}
                   className="w-full flex items-center justify-center gap-2 text-xs"
                 >
-                  <Edit2 size={14} /> Editar Valores da {room.id}
+                  <Edit2 size={14} /> Editar Tarifas por Períodos & Hora
                 </Button>
               </div>
             ))}
@@ -910,33 +971,109 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
               </div>
             </div>
 
+            {/* Painel de Cobrança Geral do Mês (Desconsiderando Cancelados) */}
+            {selectedProfId === 'ALL' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
+                <div className="p-4 bg-teal-50 border border-teal-100 rounded-2xl">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-teal-700">
+                      Cobrança Total do Mês
+                    </span>
+                    <span className="text-[9px] bg-teal-200/70 text-teal-900 px-1.5 py-0.5 rounded font-bold">
+                      {financialSummary.activeCount} locações
+                    </span>
+                  </div>
+                  <span className="text-xl font-black text-gray-900 block">
+                    R$ {financialSummary.totalToBill.toFixed(2)}
+                  </span>
+                  <p className="text-[10px] text-teal-700 font-semibold mt-1">
+                    Exclui agendamentos cancelados ({financialSummary.totalActiveHours}h ativas)
+                  </p>
+                </div>
+
+                <div className="p-4 bg-emerald-50 border border-emerald-100 rounded-2xl">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700 block mb-1">
+                    Total Recebido (Pago)
+                  </span>
+                  <span className="text-xl font-black text-emerald-800 block">
+                    R$ {financialSummary.totalPaid.toFixed(2)}
+                  </span>
+                  <p className="text-[10px] text-emerald-600 font-semibold mt-1">
+                    Valores quitados no período
+                  </p>
+                </div>
+
+                <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-amber-700 block mb-1">
+                    Saldo Pendente
+                  </span>
+                  <span className="text-xl font-black text-amber-800 block">
+                    R$ {financialSummary.totalPending.toFixed(2)}
+                  </span>
+                  <p className="text-[10px] text-amber-600 font-semibold mt-1">
+                    Aguardando baixa de pagamento
+                  </p>
+                </div>
+
+                <div className="p-4 bg-gray-50 border border-gray-200 rounded-2xl">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-gray-500">
+                      Cancelados (Desconsiderados)
+                    </span>
+                    <span className="text-[9px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-bold">
+                      {financialSummary.cancelledCount} canceladas
+                    </span>
+                  </div>
+                  <span className="text-xl font-black text-gray-500 block line-through">
+                    R$ {financialSummary.totalCancelledDisregarded.toFixed(2)}
+                  </span>
+                  <p className="text-[10px] text-emerald-700 font-bold mt-1">
+                    ✓ R$ 0,00 cobrado (Isentos da fatura)
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Painel do Profissional Selecionado (Seção 14) */}
             {selectedProfStats && (
-              <div className="p-5 bg-teal-50 border border-teal-100 rounded-2xl flex flex-wrap justify-between items-center gap-4 text-xs">
-                <div>
-                  <span className="text-[10px] font-black uppercase tracking-wider text-teal-600 block">
-                    Profissional Selecionado
-                  </span>
-                  <span className="text-base font-black text-gray-900">{selectedProfStats.name}</span>
+              <div className="p-5 bg-teal-50 border border-teal-100 rounded-2xl space-y-3 text-xs">
+                <div className="flex flex-wrap justify-between items-center gap-4">
+                  <div>
+                    <span className="text-[10px] font-black uppercase tracking-wider text-teal-600 block">
+                      Profissional Selecionado
+                    </span>
+                    <span className="text-base font-black text-gray-900">{selectedProfStats.name}</span>
+                  </div>
+                  <div className="flex flex-wrap gap-6">
+                    <div>
+                      <span className="text-gray-400 block text-[10px] font-bold uppercase">Locações Faturáveis</span>
+                      <span className="font-black text-gray-900">{selectedProfStats.count} ({selectedProfStats.hours}h)</span>
+                    </div>
+                    <div>
+                      <span className="text-teal-700 block text-[10px] font-bold uppercase">Total a Cobrar</span>
+                      <span className="font-black text-teal-900 text-sm">R$ {selectedProfStats.totalDue.toFixed(2)}</span>
+                    </div>
+                    <div>
+                      <span className="text-emerald-600 block text-[10px] font-bold uppercase">Total Pago</span>
+                      <span className="font-black text-emerald-700 text-sm">R$ {selectedProfStats.totalPaid.toFixed(2)}</span>
+                    </div>
+                    <div>
+                      <span className="text-amber-600 block text-[10px] font-bold uppercase">Saldo Devedor</span>
+                      <span className="font-black text-amber-700 text-sm">R$ {selectedProfStats.balance.toFixed(2)}</span>
+                    </div>
+                  </div>
                 </div>
-                <div className="flex gap-6">
-                  <div>
-                    <span className="text-gray-400 block text-[10px] font-bold uppercase">Locações</span>
-                    <span className="font-black text-gray-900">{selectedProfStats.count} ({selectedProfStats.hours}h)</span>
+
+                {selectedProfStats.cancelledCount > 0 && (
+                  <div className="pt-2 border-t border-teal-100/60 flex items-center justify-between text-[11px] text-gray-600">
+                    <span>
+                      <strong>{selectedProfStats.cancelledCount} agendamento(s) cancelado(s)</strong> no mês de referência.
+                    </span>
+                    <span className="text-emerald-700 font-bold">
+                      R$ {selectedProfStats.cancelledAmount.toFixed(2)} desconsiderados da fatura (R$ 0,00 cobrado)
+                    </span>
                   </div>
-                  <div>
-                    <span className="text-gray-400 block text-[10px] font-bold uppercase">Total Devido</span>
-                    <span className="font-black text-gray-900">R$ {selectedProfStats.totalDue.toFixed(2)}</span>
-                  </div>
-                  <div>
-                    <span className="text-emerald-600 block text-[10px] font-bold uppercase">Total Pago</span>
-                    <span className="font-black text-emerald-700">R$ {selectedProfStats.totalPaid.toFixed(2)}</span>
-                  </div>
-                  <div>
-                    <span className="text-amber-600 block text-[10px] font-bold uppercase">Saldo Devedor</span>
-                    <span className="font-black text-amber-700">R$ {selectedProfStats.balance.toFixed(2)}</span>
-                  </div>
-                </div>
+                )}
               </div>
             )}
           </div>
@@ -958,44 +1095,87 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {filteredFinancialBookings.map(b => (
-                    <tr key={b.id} className="hover:bg-gray-50/50">
-                      <td className="py-4 px-6 font-black text-gray-900">
-                        {format(parseISO(b.date), 'dd/MM/yyyy')}
+                  {filteredFinancialBookings.map(b => {
+                    const isCancelled = b.paymentStatus === 'CANCELLED';
+                    return (
+                      <tr key={b.id} className={isCancelled ? "bg-red-50/30 hover:bg-red-50/50" : "hover:bg-gray-50/50"}>
+                        <td className="py-4 px-6 font-black text-gray-900">
+                          {format(parseISO(b.date), 'dd/MM/yyyy')}
+                        </td>
+                        <td className="py-4 px-6 font-bold text-teal-700">{b.roomId}</td>
+                        <td className="py-4 px-6 font-black text-gray-800">{b.userName}</td>
+                        <td className="py-4 px-6 font-bold text-gray-600">
+                          {`${b.hour.toString().padStart(2, '0')}:00 - ${b.endTimeHour.toString().padStart(2, '0')}:00`}
+                        </td>
+                        <td className="py-4 px-6 text-gray-500">
+                          {b.durationHours}h {b.type === 'PERIOD' ? `(${b.periodName ? `Período ${b.periodName}` : 'Período'})` : ''}
+                        </td>
+                        <td className="py-4 px-6 text-right">
+                          {isCancelled ? (
+                            <div className="flex flex-col items-end">
+                              <span className="text-gray-400 line-through text-[11px] font-semibold">
+                                R$ {b.totalAmount.toFixed(2)}
+                              </span>
+                              <span className="font-black text-red-600 text-xs">
+                                R$ 0,00
+                              </span>
+                              <span className="text-[9px] font-bold text-gray-500 uppercase tracking-tighter">
+                                Desconsiderado
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="font-black text-gray-900 text-xs">
+                              R$ {b.totalAmount.toFixed(2)}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-4 px-6 text-center">
+                          <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                            b.paymentStatus === 'PAID'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : isCancelled
+                              ? 'bg-red-100 text-red-700'
+                              : 'bg-amber-100 text-amber-800'
+                          }`}>
+                            {b.paymentStatus === 'PAID' ? 'Pago' : isCancelled ? 'Cancelado (Sem Cobrança)' : 'Pendente'}
+                          </span>
+                        </td>
+                        <td className="py-4 px-6 text-right">
+                          <button
+                            onClick={() => handleOpenPaymentModal(b)}
+                            className="text-teal-600 hover:text-teal-800 font-bold uppercase text-[11px]"
+                          >
+                            Alterar Status
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                {filteredFinancialBookings.length > 0 && (
+                  <tfoot className="bg-gray-50/80 border-t-2 border-gray-200 font-black text-xs">
+                    <tr>
+                      <td colSpan={4} className="py-4 px-6 text-gray-700">
+                        Totalizadores da Cobrança ({financialSummary.activeCount} faturáveis • {financialSummary.cancelledCount} canceladas desconsideradas)
                       </td>
-                      <td className="py-4 px-6 font-bold text-teal-700">{b.roomId}</td>
-                      <td className="py-4 px-6 font-black text-gray-800">{b.userName}</td>
-                      <td className="py-4 px-6 font-bold text-gray-600">
-                        {`${b.hour.toString().padStart(2, '0')}:00 - ${b.endTimeHour.toString().padStart(2, '0')}:00`}
+                      <td className="py-4 px-6 text-gray-700">
+                        {financialSummary.totalActiveHours}h
                       </td>
-                      <td className="py-4 px-6 text-gray-500">
-                        {b.durationHours}h {b.type === 'PERIOD' ? `(${b.periodName ? `Período ${b.periodName}` : 'Período'})` : ''}
-                      </td>
-                      <td className="py-4 px-6 text-right font-black text-gray-900">
-                        R$ {b.totalAmount.toFixed(2)}
-                      </td>
-                      <td className="py-4 px-6 text-center">
-                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ${
-                          b.paymentStatus === 'PAID'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : b.paymentStatus === 'CANCELLED'
-                            ? 'bg-red-100 text-red-700'
-                            : 'bg-amber-100 text-amber-800'
-                        }`}>
-                          {b.paymentStatus === 'PAID' ? 'Pago' : b.paymentStatus === 'CANCELLED' ? 'Cancelado' : 'Pendente'}
+                      <td className="py-4 px-6 text-right text-gray-900">
+                        R$ {financialSummary.totalToBill.toFixed(2)}
+                        <span className="block text-[9px] font-bold text-emerald-700">
+                          (Sem cancelados)
                         </span>
                       </td>
-                      <td className="py-4 px-6 text-right">
-                        <button
-                          onClick={() => handleOpenPaymentModal(b)}
-                          className="text-teal-600 hover:text-teal-800 font-bold uppercase text-[11px]"
-                        >
-                          Alterar Status
-                        </button>
+                      <td className="py-4 px-6 text-center text-[11px] text-gray-600">
+                        Pago: R$ {financialSummary.totalPaid.toFixed(2)}
+                      </td>
+                      <td className="py-4 px-6 text-right text-[11px] text-amber-700">
+                        Pendente: R$ {financialSummary.totalPending.toFixed(2)}
                       </td>
                     </tr>
-                  ))}
-                </tbody>
+                  </tfoot>
+                )}
               </table>
             </div>
           </div>
@@ -1581,25 +1761,74 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
       <Modal
         isOpen={!!editingRoom}
         onClose={() => setEditingRoom(null)}
-        title={`Editar Tarifas — ${editingRoom?.id}`}
+        title={`Editar Tarifas por Períodos — ${editingRoom?.id}`}
       >
         <div className="space-y-4">
-          <Input
-            label="Novo Valor por Hora (R$)"
-            type="number"
-            value={editHourlyRate.toString()}
-            onChange={e => setEditHourlyRate(Number(e.target.value))}
-          />
+          <div>
+            <Input
+              label="Valor da Hora Avulsa (R$)"
+              type="number"
+              value={editHourlyRate.toString()}
+              onChange={e => setEditHourlyRate(Number(e.target.value))}
+            />
+          </div>
 
-          <Input
-            label="Novo Valor do Período Integral (07h às 22h) (R$)"
-            type="number"
-            value={editDailyRate.toString()}
-            onChange={e => setEditDailyRate(Number(e.target.value))}
-          />
+          <div className="pt-2 border-t border-gray-100">
+            <h4 className="text-xs font-black uppercase tracking-wider text-teal-800 mb-3">
+              Valores por Período (Turnos)
+            </h4>
+            
+            <div className="space-y-3">
+              <div>
+                <Input
+                  label="Período Manhã (07:00 às 12:00 — 5h) (R$)"
+                  type="number"
+                  value={editMorningRate.toString()}
+                  onChange={e => setEditMorningRate(Number(e.target.value))}
+                />
+              </div>
+
+              <div>
+                <Input
+                  label="Período Tarde (12:00 às 18:00 — 6h) (R$)"
+                  type="number"
+                  value={editAfternoonRate.toString()}
+                  onChange={e => setEditAfternoonRate(Number(e.target.value))}
+                />
+                <p className="text-[10px] text-gray-400 mt-1">
+                  * Aos sábados a clínica encerra às 14:00 (proporcional calculado automaticamente).
+                </p>
+              </div>
+
+              <div>
+                <Input
+                  label="Período Noite (18:00 às 22:00 — 4h) (R$)"
+                  type="number"
+                  value={editNightRate.toString()}
+                  onChange={e => setEditNightRate(Number(e.target.value))}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Resumo Dinâmico dos Períodos */}
+          <div className="p-3.5 bg-teal-50 border border-teal-100 rounded-2xl text-xs space-y-1">
+            <span className="font-black text-teal-900 block text-[11px] uppercase tracking-wider">
+              Resumo da Cobrança por Turno:
+            </span>
+            <div className="flex justify-between text-gray-700">
+              <span>Manhã (5h): <strong>R$ {editMorningRate.toFixed(2)}</strong></span>
+              <span>Tarde (6h): <strong>R$ {editAfternoonRate.toFixed(2)}</strong></span>
+              <span>Noite (4h): <strong>R$ {editNightRate.toFixed(2)}</strong></span>
+            </div>
+            <div className="pt-1.5 border-t border-teal-200/60 flex justify-between font-black text-teal-900 text-xs">
+              <span>Soma dos 3 Turnos (Diária 15h):</span>
+              <span>R$ {(editMorningRate + editAfternoonRate + editNightRate).toFixed(2)}</span>
+            </div>
+          </div>
 
           <p className="text-[11px] text-gray-500 italic">
-            * Importante: as reservas criadas anteriormente manterão o valor original contratado.
+            * As reservas criadas anteriormente manterão o valor original contratado.
           </p>
 
           <div className="pt-2 flex justify-end gap-3">
@@ -1607,7 +1836,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
               Cancelar
             </Button>
             <Button disabled={isUpdatingRates} onClick={handleSaveRoomRates}>
-              {isUpdatingRates ? 'Salvando...' : 'Salvar Novos Valores'}
+              {isUpdatingRates ? 'Salvando...' : 'Salvar Tarifas'}
             </Button>
           </div>
         </div>
