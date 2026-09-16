@@ -1,0 +1,8 @@
+{
+  "name": "LocaPsico - Locação de Salas",
+  "description": "Sistema completo de gestão e locação de 2 salas para psicólogos e terapeutas com agenda semanal, controle financeiro e painel administrativo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
