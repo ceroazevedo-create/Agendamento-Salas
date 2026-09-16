@@ -17,7 +17,7 @@ import {
   Search, CheckCircle2, XCircle, Trash2, Edit2, 
   Download, Plus, RefreshCw, Clock, ArrowRight, Lock,
   UserX, AlertTriangle, KeyRound, Copy, Eye, EyeOff, MessageCircle,
-  UserCheck, ShieldCheck, Check
+  UserCheck, ShieldCheck, Check, Palmtree, CalendarOff
 } from 'lucide-react';
 import { useToast } from './Toast';
 import { checkPasswordStrength, getPasswordValidationMessage } from '../utils/passwordSecurity';
@@ -100,10 +100,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
 
   // New Block Modal
   const [isBlockModalOpen, setIsBlockModalOpen] = useState(false);
-  const [blockRoom, setBlockRoom] = useState<RoomId | 'ALL'>('Sala 1');
+  const [blockType, setBlockType] = useState<'FULL_DAY' | 'HOURS'>('FULL_DAY');
+  const [blockRoom, setBlockRoom] = useState<RoomId | 'ALL'>('ALL');
   const [blockDate, setBlockDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
-  const [blockStartHour, setBlockStartHour] = useState<number>(8);
-  const [blockEndHour, setBlockEndHour] = useState<number>(12);
+  const [blockStartHour, setBlockStartHour] = useState<number>(7);
+  const [blockEndHour, setBlockEndHour] = useState<number>(22);
   const [blockReason, setBlockReason] = useState<string>('');
   const [isCreatingBlock, setIsCreatingBlock] = useState(false);
 
@@ -299,23 +300,48 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
     }
   };
 
+  const handleOpenNewBlockModal = (type: 'FULL_DAY' | 'HOURS' = 'FULL_DAY', initialReason = '') => {
+    setBlockType(type);
+    setBlockRoom('ALL');
+    setBlockDate(format(new Date(), 'yyyy-MM-dd'));
+    setBlockReason(initialReason);
+    const dayOfWeek = new Date().getDay();
+    const maxHour = getClosingHourForDate(dayOfWeek) || 22;
+    setBlockStartHour(7);
+    setBlockEndHour(maxHour);
+    setIsBlockModalOpen(true);
+  };
+
   const handleCreateBlock = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!blockReason.trim()) return addToast('Informe o motivo do bloqueio.', 'error');
-    if (blockStartHour >= blockEndHour) return addToast('O horário final deve ser maior que o inicial.', 'error');
+    if (!blockReason.trim()) return addToast('Informe o motivo do bloqueio (ex: Feriado Nacional, Manutenção).', 'error');
 
-    if (blockDate) {
-      const [y, m, d] = blockDate.split('-').map(Number);
-      const dayOfWeek = new Date(y, m - 1, d).getDay();
-      if (dayOfWeek === 0) {
-        return addToast('As salas já estão fechadas aos domingos.', 'warning');
+    if (!blockDate) return addToast('Selecione a data do bloqueio.', 'error');
+
+    const [y, m, d] = blockDate.split('-').map(Number);
+    const dayOfWeek = new Date(y, m - 1, d).getDay();
+    if (dayOfWeek === 0) {
+      return addToast('A clínica já não funciona aos domingos (fechamento padrão).', 'warning');
+    }
+
+    const maxHour = getClosingHourForDate(dayOfWeek) || 22;
+    const minHour = 7;
+
+    let finalStartHour = blockStartHour;
+    let finalEndHour = blockEndHour;
+
+    if (blockType === 'FULL_DAY') {
+      finalStartHour = minHour;
+      finalEndHour = maxHour;
+    } else {
+      if (blockStartHour >= blockEndHour) {
+        return addToast('O horário final deve ser maior que o inicial.', 'error');
       }
-      const maxHour = getClosingHourForDate(dayOfWeek);
       if (blockEndHour > maxHour || blockStartHour >= maxHour) {
         return addToast(
           dayOfWeek === 6 
-            ? 'Aos sábados o horário de funcionamento vai apenas até as 14:00.' 
-            : `O horário de funcionamento neste dia encerra às ${maxHour}:00.`, 
+            ? 'Aos sábados o expediente encerra às 14:00.' 
+            : `O expediente neste dia encerra às ${maxHour}:00.`, 
           'warning'
         );
       }
@@ -326,13 +352,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
       await bookingService.createBlockedSlot({
         roomId: blockRoom,
         date: blockDate,
-        startHour: blockStartHour,
-        endHour: blockEndHour,
-        reason: blockReason,
+        startHour: finalStartHour,
+        endHour: finalEndHour,
+        reason: blockReason.trim(),
         createdBy: adminActor.name || 'Administração'
       }, adminActor);
 
-      addToast('Bloqueio cadastrado com sucesso!', 'success');
+      addToast(
+        blockType === 'FULL_DAY'
+          ? `Dia ${format(parseISO(blockDate), 'dd/MM/yyyy')} bloqueado com sucesso (feriado/dia inteiro)!`
+          : 'Bloqueio de horário cadastrado com sucesso!', 
+        'success'
+      );
       setIsBlockModalOpen(false);
       setBlockReason('');
       await loadAdminData();
@@ -1299,49 +1330,77 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
       {/* ================= 7. BLOQUEIOS DE HORÁRIOS (Seção 33, 34) ================= */}
       {activeTab === 'blocks' && (
         <div className="bg-white rounded-3xl p-6 lg:p-8 border border-gray-100 shadow-sm space-y-6">
-          <div className="flex justify-between items-center">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
-              <h3 className="text-xl font-black text-gray-900">Bloqueios Administrativos</h3>
+              <h3 className="text-xl font-black text-gray-900">Bloqueios Administrativos & Feriados</h3>
               <p className="text-xs text-gray-400 font-bold uppercase tracking-wider mt-0.5">
-                Bloqueie horários por manutenção, limpeza, reuniões ou feriados
+                Bloqueie feriados (dia inteiro) ou horários específicos por manutenção e reuniões
               </p>
             </div>
-            <Button onClick={() => setIsBlockModalOpen(true)} className="flex items-center gap-1.5 text-xs">
-              <Plus size={14} /> Novo Bloqueio
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() => handleOpenNewBlockModal('FULL_DAY', 'Feriado / Recesso da Clínica')}
+                className="flex items-center gap-1.5 text-xs bg-amber-600 hover:bg-amber-700 text-white border-amber-600 shadow-xs"
+              >
+                <Palmtree size={14} /> Bloquear Feriado (Dia Todo)
+              </Button>
+              <Button
+                onClick={() => handleOpenNewBlockModal('HOURS')}
+                variant="secondary"
+                className="flex items-center gap-1.5 text-xs"
+              >
+                <Clock size={14} /> Bloquear Horário
+              </Button>
+            </div>
           </div>
 
           {blocks.length === 0 ? (
-            <p className="text-xs text-gray-400 italic py-8 text-center">
-              Nenhum bloqueio administrativo ativo no momento.
-            </p>
+            <div className="p-8 bg-amber-50/40 rounded-2xl border border-amber-100 text-center space-y-2">
+              <CalendarOff size={28} className="mx-auto text-amber-400" />
+              <p className="text-xs font-bold text-gray-700">Nenhum bloqueio administrativo ou feriado ativo no momento.</p>
+              <p className="text-[11px] text-gray-400">
+                Utilize os botões acima para bloquear um dia inteiro (feriado) ou um horário específico.
+              </p>
+            </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {blocks.map(b => (
-                <div key={b.id} className="p-5 rounded-2xl border border-amber-200 bg-amber-50/50 flex justify-between items-center">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-black text-xs text-amber-900">{b.roomId === 'ALL' ? 'Todas as Salas' : b.roomId}</span>
-                      <span className="text-[10px] bg-amber-200/60 text-amber-800 px-2 py-0.5 rounded font-black">
-                        {format(parseISO(b.date), 'dd/MM/yyyy')}
-                      </span>
+              {blocks.map(b => {
+                const isFullDay = b.startHour <= 7 && b.endHour >= 14;
+                return (
+                  <div key={b.id} className="p-5 rounded-2xl border border-amber-200 bg-amber-50/50 flex justify-between items-start gap-3">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-black text-xs text-amber-900">
+                          {b.roomId === 'ALL' ? 'Todas as Salas (Clínica toda)' : b.roomId}
+                        </span>
+                        <span className={`text-[10px] px-2 py-0.5 rounded font-black uppercase tracking-wider ${
+                          isFullDay ? 'bg-amber-200 text-amber-900' : 'bg-amber-200/60 text-amber-800'
+                        }`}>
+                          {isFullDay ? '🌴 Feriado (Dia Todo)' : `⏱️ ${b.startHour}:00 às ${b.endHour}:00`}
+                        </span>
+                      </div>
+                      <p className="text-xs font-bold text-amber-900">
+                        Data: {format(parseISO(b.date), 'dd/MM/yyyy')}
+                      </p>
+                      <p className="text-xs font-medium text-amber-800">
+                        Motivo: <span className="font-bold">{b.reason}</span>
+                      </p>
+                      {b.createdBy && (
+                        <p className="text-[10px] text-amber-600">
+                          Por: {b.createdBy}
+                        </p>
+                      )}
                     </div>
-                    <p className="text-xs font-bold text-amber-800 mt-1">
-                      Horário: {b.startHour}:00 às {b.endHour}:00
-                    </p>
-                    <p className="text-[11px] text-amber-700 mt-0.5 italic">
-                      Motivo: {b.reason}
-                    </p>
+                    <button
+                      onClick={() => handleDeleteBlock(b.id)}
+                      className="p-2 text-red-500 hover:bg-red-100 rounded-xl transition-colors shrink-0"
+                      title="Desativar Bloqueio"
+                    >
+                      <Trash2 size={16} />
+                    </button>
                   </div>
-                  <button
-                    onClick={() => handleDeleteBlock(b.id)}
-                    className="p-2 text-red-500 hover:bg-red-100 rounded-xl transition-colors"
-                    title="Desativar Bloqueio"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -1349,7 +1408,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
 
       {/* ================= 8. CONFIGURAÇÕES (Seção 29) ================= */}
       {activeTab === 'settings' && (
-        <div className="bg-white rounded-3xl p-6 lg:p-8 border border-gray-100 shadow-sm max-w-2xl mx-auto space-y-6">
+        <div className="bg-white rounded-3xl p-6 lg:p-8 border border-gray-100 shadow-sm max-w-3xl mx-auto space-y-6">
           <div>
             <h3 className="text-xl font-black text-gray-900">Configurações Gerais da Clínica</h3>
             <p className="text-xs text-gray-400 font-bold uppercase tracking-wider mt-0.5">
@@ -1402,6 +1461,115 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
               }}>
                 Salvar Configurações
               </Button>
+            </div>
+          </div>
+
+          {/* ================= BLOQUEIO DE HORÁRIOS OU DIA (FERIADOS) ================= */}
+          <div className="pt-6 border-t border-gray-100">
+            <div className="p-6 rounded-3xl border border-amber-200 bg-amber-50/40 space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-start gap-3.5">
+                  <div className="w-12 h-12 bg-amber-100 text-amber-800 rounded-2xl flex items-center justify-center shrink-0 shadow-xs">
+                    <Palmtree size={24} />
+                  </div>
+                  <div>
+                    <h4 className="text-base font-black text-gray-900">
+                      Bloqueio de Horários ou Dia Completo (Feriados & Recessos)
+                    </h4>
+                    <p className="text-xs text-gray-600 mt-0.5 leading-relaxed">
+                      Bloqueie o dia inteiro para feriados nacionais, municipais ou reformas da clínica, ou restrinja faixas específicas de horários para evitar agendamentos.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    onClick={() => handleOpenNewBlockModal('FULL_DAY', 'Feriado / Recesso da Clínica')}
+                    className="flex items-center gap-1.5 text-xs py-2 px-3.5 shadow-xs bg-amber-600 hover:bg-amber-700 text-white border-amber-600"
+                  >
+                    <Palmtree size={14} /> Bloquear Feriado (Dia Todo)
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => handleOpenNewBlockModal('HOURS')}
+                    className="flex items-center gap-1.5 text-xs py-2 px-3.5"
+                  >
+                    <Clock size={14} /> Bloquear Horário
+                  </Button>
+                </div>
+              </div>
+
+              {/* Lista dos Bloqueios & Feriados Cadastrados */}
+              <div className="space-y-3 pt-1">
+                <div className="flex items-center justify-between text-xs font-bold text-gray-500 uppercase tracking-wider px-1">
+                  <span>Bloqueios & Feriados Cadastrados ({blocks.length})</span>
+                  {blocks.length > 0 && (
+                    <span className="text-[10px] text-amber-800 font-semibold normal-case">
+                      * Dias e horários bloqueados impedem agendamentos por terapeutas.
+                    </span>
+                  )}
+                </div>
+
+                {blocks.length === 0 ? (
+                  <div className="p-6 bg-white rounded-2xl border border-amber-100 text-center space-y-2">
+                    <CalendarOff size={24} className="mx-auto text-amber-400" />
+                    <p className="text-xs font-semibold text-gray-700">Nenhum feriado ou horário bloqueado no momento.</p>
+                    <p className="text-[11px] text-gray-400">
+                      Utilize os botões acima para bloquear feriados (o dia todo) ou horários pontuais por manutenção/reunião.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {blocks.map(b => {
+                      const isFullDay = b.startHour <= 7 && b.endHour >= 14;
+                      return (
+                        <div
+                          key={b.id}
+                          className="p-4 bg-white rounded-2xl border border-amber-200/80 shadow-xs flex justify-between items-start gap-3 hover:border-amber-300 transition-all"
+                        >
+                          <div className="space-y-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-xs font-black text-gray-900">
+                                {b.roomId === 'ALL' ? 'Todas as Salas (Clínica toda)' : b.roomId}
+                              </span>
+                              <span className={`text-[10px] font-black px-2 py-0.5 rounded-md uppercase tracking-wider ${
+                                isFullDay 
+                                  ? 'bg-amber-100 text-amber-800' 
+                                  : 'bg-teal-50 text-teal-700'
+                              }`}>
+                                {isFullDay ? '🌴 Dia Inteiro' : `⏱️ ${b.startHour}h às ${b.endHour}h`}
+                              </span>
+                            </div>
+
+                            <p className="text-xs font-bold text-teal-900">
+                              📅 {format(parseISO(b.date), 'dd/MM/yyyy')}
+                            </p>
+
+                            <p className="text-xs text-gray-600">
+                              Motivo: <strong className="text-gray-800">{b.reason}</strong>
+                            </p>
+                            {b.createdBy && (
+                              <span className="text-[10px] text-gray-400 block">
+                                Criado por: {b.createdBy}
+                              </span>
+                            )}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteBlock(b.id)}
+                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all shrink-0"
+                            title="Remover bloqueio"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1892,21 +2060,51 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
       <Modal
         isOpen={isBlockModalOpen}
         onClose={() => setIsBlockModalOpen(false)}
-        title="Criar Bloqueio de Horário"
+        title={blockType === 'FULL_DAY' ? 'Bloquear Dia Completo (Feriado / Recesso)' : 'Bloquear Faixa de Horários'}
       >
         <form onSubmit={handleCreateBlock} className="space-y-4">
+          {/* Seletor de Tipo: Dia Inteiro vs Horários */}
+          <div className="grid grid-cols-2 gap-2 p-1.5 bg-gray-100 rounded-2xl">
+            <button
+              type="button"
+              onClick={() => {
+                setBlockType('FULL_DAY');
+                setBlockRoom('ALL');
+                if (!blockReason) setBlockReason('Feriado Nacional / Recesso');
+              }}
+              className={`py-2 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 ${
+                blockType === 'FULL_DAY'
+                  ? 'bg-amber-600 text-white shadow-xs'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              <Palmtree size={14} /> Dia Inteiro (Feriado)
+            </button>
+            <button
+              type="button"
+              onClick={() => setBlockType('HOURS')}
+              className={`py-2 px-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 ${
+                blockType === 'HOURS'
+                  ? 'bg-teal-600 text-white shadow-xs'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              <Clock size={14} /> Horário Específico
+            </button>
+          </div>
+
           <div>
             <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
-              Sala a Bloquear
+              Abrangência da Sala
             </label>
             <select
               value={blockRoom}
               onChange={e => setBlockRoom(e.target.value as RoomId | 'ALL')}
               className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold"
             >
-              <option value="Sala 1">Sala 1</option>
-              <option value="Sala 2">Sala 2</option>
-              <option value="ALL">Todas as Salas (Clínica Toda)</option>
+              <option value="ALL">Todas as Salas (Clínica Toda — Ideal para Feriados)</option>
+              <option value="Sala 1">Apenas Sala 1</option>
+              <option value="Sala 2">Apenas Sala 2</option>
             </select>
           </div>
 
@@ -1919,66 +2117,106 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
               required
             />
             <span className="text-[10px] text-gray-400 font-medium block mt-1">
-              Nota: As salas já não funcionam aos domingos (fechamento automático).
+              * A clínica já não abre aos domingos (fechamento padrão). Aos sábados fecha às 14h.
             </span>
           </div>
 
-          {/* Seletor dinâmico baseado na data (Sábado até 14h) */}
-          {(() => {
-            const blockDayOfWeek = blockDate ? new Date(Number(blockDate.split('-')[0]), Number(blockDate.split('-')[1]) - 1, Number(blockDate.split('-')[2])).getDay() : 1;
-            const maxBlockHour = getClosingHourForDate(blockDayOfWeek) || 22;
-            const startHourOptions = [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21].filter(h => h < maxBlockHour);
-            const endHourOptions = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22].filter(h => h <= maxBlockHour && h > blockStartHour);
-
-            return (
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
-                    Horário Inicial
-                  </label>
-                  <select
-                    value={blockStartHour}
-                    onChange={e => setBlockStartHour(Number(e.target.value))}
-                    className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold"
-                  >
-                    {startHourOptions.map(h => (
-                      <option key={h} value={h}>{h}:00</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
-                    Horário Final
-                  </label>
-                  <select
-                    value={blockEndHour}
-                    onChange={e => setBlockEndHour(Number(e.target.value))}
-                    className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold"
-                  >
-                    {endHourOptions.map(h => (
-                      <option key={h} value={h}>{h}:00</option>
-                    ))}
-                  </select>
-                </div>
+          {blockType === 'FULL_DAY' ? (
+            <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl text-xs space-y-1.5">
+              <div className="flex items-center gap-2 text-amber-900 font-bold">
+                <Palmtree size={15} className="text-amber-700" />
+                <span>Bloqueio do Dia Inteiro Selecionado</span>
               </div>
-            );
-          })()}
+              <p className="text-gray-600 text-[11px] leading-relaxed">
+                Nenhum terapeuta poderá agendar horários nesta data. O bloqueio cobrirá o expediente integral (07:00 às {
+                  blockDate && new Date(Number(blockDate.split('-')[0]), Number(blockDate.split('-')[1]) - 1, Number(blockDate.split('-')[2])).getDay() === 6 ? '14:00' : '22:00'
+                }).
+              </p>
+            </div>
+          ) : (
+            /* Seletor dinâmico baseado na data (Sábado até 14h) */
+            (() => {
+              const blockDayOfWeek = blockDate ? new Date(Number(blockDate.split('-')[0]), Number(blockDate.split('-')[1]) - 1, Number(blockDate.split('-')[2])).getDay() : 1;
+              const maxBlockHour = getClosingHourForDate(blockDayOfWeek) || 22;
+              const startHourOptions = [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21].filter(h => h < maxBlockHour);
+              const endHourOptions = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22].filter(h => h <= maxBlockHour && h > blockStartHour);
 
-          <Input
-            label="Motivo do Bloqueio *"
-            value={blockReason}
-            onChange={e => setBlockReason(e.target.value)}
-            placeholder="Ex: Manutenção do ar condicionado, limpeza, reunião..."
-            required
-          />
+              return (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
+                      Horário Inicial
+                    </label>
+                    <select
+                      value={blockStartHour}
+                      onChange={e => setBlockStartHour(Number(e.target.value))}
+                      className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold"
+                    >
+                      {startHourOptions.map(h => (
+                        <option key={h} value={h}>{h}:00</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
+                      Horário Final
+                    </label>
+                    <select
+                      value={blockEndHour}
+                      onChange={e => setBlockEndHour(Number(e.target.value))}
+                      className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold"
+                    >
+                      {endHourOptions.map(h => (
+                        <option key={h} value={h}>{h}:00</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              );
+            })()
+          )}
+
+          <div>
+            <Input
+              label="Motivo do Bloqueio *"
+              value={blockReason}
+              onChange={e => setBlockReason(e.target.value)}
+              placeholder="Ex: Feriado Nacional, Tiradentes, Manutenção, Limpeza..."
+              required
+            />
+            {/* Atalhos de motivos frequentes */}
+            <div className="flex flex-wrap items-center gap-1.5 mt-2">
+              <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mr-1">Sugestões:</span>
+              {[
+                'Feriado Nacional',
+                'Feriado Municipal',
+                'Recesso de Fim de Ano',
+                'Emenda de Feriado',
+                'Manutenção / Reforma'
+              ].map(sug => (
+                <button
+                  key={sug}
+                  type="button"
+                  onClick={() => setBlockReason(sug)}
+                  className="px-2.5 py-1 bg-gray-100 hover:bg-amber-100 hover:text-amber-900 text-gray-600 rounded-lg text-[10px] font-bold transition-colors"
+                >
+                  + {sug}
+                </button>
+              ))}
+            </div>
+          </div>
 
           <div className="pt-2 flex justify-end gap-3">
             <Button type="button" variant="secondary" onClick={() => setIsBlockModalOpen(false)}>
               Cancelar
             </Button>
-            <Button type="submit" disabled={isCreatingBlock}>
-              {isCreatingBlock ? 'Bloqueando...' : 'Salvar Bloqueio'}
+            <Button 
+              type="submit" 
+              disabled={isCreatingBlock}
+              className={blockType === 'FULL_DAY' ? 'bg-amber-600 hover:bg-amber-700 text-white border-amber-600' : ''}
+            >
+              {isCreatingBlock ? 'Salvando...' : blockType === 'FULL_DAY' ? 'Bloquear Dia Inteiro' : 'Salvar Bloqueio'}
             </Button>
           </div>
         </form>
