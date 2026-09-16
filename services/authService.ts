@@ -409,9 +409,13 @@ export const authService = {
   },
 
   /**
-   * Redefinição administrativa: envia e-mail oficial de redefinição de senha para o profissional.
+   * Redefinição administrativa: atualiza diretamente a senha do profissional no Supabase Auth.
    */
-  adminResetUserPassword: async (userId: string, _newPassword: string, adminUser: User): Promise<void> => {
+  adminResetUserPassword: async (userId: string, newPassword: string, adminUser: User): Promise<void> => {
+    if (!newPassword || typeof newPassword !== 'string' || newPassword.trim().length < 6) {
+      throw new Error('A nova senha deve ter no mínimo 6 caracteres.');
+    }
+
     const { data: target, error: targetError } = await supabase
       .from('profiles')
       .select('email, full_name')
@@ -423,19 +427,35 @@ export const authService = {
       throw new Error('E-mail do profissional não localizado.');
     }
 
-    const { error } = await supabase.auth.resetPasswordForEmail(String(targetEmail), {
-      redirectTo: window.location.origin
+    // Obter o token de autenticação da sessão do administrador
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData?.session?.access_token;
+
+    // Chama o endpoint de backend com service role para atualizar a senha no Supabase Auth
+    const response = await fetch('/api/admin/reset-password', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      },
+      body: JSON.stringify({
+        userId,
+        email: targetEmail,
+        newPassword: newPassword.trim(),
+        adminName: adminUser.name
+      })
     });
 
-    if (error) {
-      throw new Error(translateSupabaseError(error));
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || 'Erro ao atualizar a senha do profissional no servidor.');
     }
 
     addAuditLog(
       adminUser.id,
       adminUser.name,
       'Redefinição de Senha de Profissional',
-      `Link de recuperação de senha enviado com sucesso para ${targetEmail}.`
+      `Senha de ${targetEmail} redefinida com sucesso para a nova credencial gerada pelo administrador.`
     );
   },
 
