@@ -431,32 +431,74 @@ export const authService = {
     const { data: sessionData } = await supabase.auth.getSession();
     const token = sessionData?.session?.access_token;
 
-    // Chama o endpoint de backend com service role para atualizar a senha no Supabase Auth
-    const response = await fetch('/api/admin/reset-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
-      },
-      body: JSON.stringify({
-        userId,
-        email: targetEmail,
-        newPassword: newPassword.trim(),
-        adminName: adminUser.name
-      })
-    });
+    try {
+      // Chama o endpoint de backend com service role para atualizar a senha no Supabase Auth
+      const response = await fetch('/api/admin/reset-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({
+          userId,
+          email: targetEmail,
+          newPassword: newPassword.trim(),
+          adminName: adminUser.name
+        })
+      });
 
-    const result = await response.json();
-    if (!response.ok || !result.success) {
-      throw new Error(result.error || 'Erro ao atualizar a senha do profissional no servidor.');
+      let result: any = null;
+      try {
+        const text = await response.text();
+        result = JSON.parse(text);
+      } catch {
+        // Resposta não é JSON (ex: página HTML 404 em hospedagem estática como GitHub Pages)
+      }
+
+      if (!response.ok || !result?.success) {
+        if (response.status === 404) {
+          // Em ambientes estáticos sem Node.js ativo (ex: GitHub Pages), envia link de redefinição por e-mail via Supabase Auth
+          const { error: resetErr } = await supabase.auth.resetPasswordForEmail(targetEmail, {
+            redirectTo: window.location.origin
+          });
+          if (resetErr) {
+            throw new Error('Servidor de backend não disponível e falha no envio por e-mail: ' + translateSupabaseError(resetErr));
+          }
+          addAuditLog(
+            adminUser.id,
+            adminUser.name,
+            'Link de Recuperação de Senha Enviado',
+            `Como o servidor de backend não está ativo nesta hospedagem estática, foi enviado um link de redefinição para ${targetEmail} via Supabase Auth.`
+          );
+          return;
+        }
+        throw new Error(result?.error || `Erro (${response.status}) ao atualizar a senha do profissional no servidor.`);
+      }
+
+      addAuditLog(
+        adminUser.id,
+        adminUser.name,
+        'Redefinição de Senha de Profissional',
+        `Senha de ${targetEmail} redefinida com sucesso para a nova credencial gerada pelo administrador.`
+      );
+    } catch (fetchErr: any) {
+      // Se houver erro de conexão com /api/admin/reset-password, tenta envio por e-mail
+      if (fetchErr.message?.includes('Failed to fetch') || fetchErr.message?.includes('NetworkError')) {
+        const { error: emailErr } = await supabase.auth.resetPasswordForEmail(targetEmail, {
+          redirectTo: window.location.origin
+        });
+        if (!emailErr) {
+          addAuditLog(
+            adminUser.id,
+            adminUser.name,
+            'Link de Recuperação de Senha Enviado',
+            `Link de redefinição enviado para o e-mail ${targetEmail} via Supabase Auth.`
+          );
+          return;
+        }
+      }
+      throw fetchErr;
     }
-
-    addAuditLog(
-      adminUser.id,
-      adminUser.name,
-      'Redefinição de Senha de Profissional',
-      `Senha de ${targetEmail} redefinida com sucesso para a nova credencial gerada pelo administrador.`
-    );
   },
 
   /**
@@ -479,24 +521,36 @@ export const authService = {
 
   /**
    * Lista todos os perfis cadastrados no Supabase (utilizado pelo Administrador).
+   * Possui fallback resiliente para garantir que o painel administrativo sempre carregue.
    */
   getAllProfiles: async (): Promise<User[]> => {
-    const { data: profiles, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .order('full_name', { ascending: true });
+    if (isSupabaseConfigured) {
+      try {
+        const { data: profiles, error } = await supabase
+          .from('profiles')
+          .select('*')
+          .order('full_name', { ascending: true });
 
-    if (error) {
-      throw new Error(translateSupabaseError(error));
+        if (error) {
+          console.warn('Aviso ao consultar perfis do Supabase:', error);
+        } else if (profiles && profiles.length > 0) {
+          const { data: professionals } = await supabase
+            .from('professionals')
+            .select('*');
+
+          const profsMap = new Map((professionals || []).map(p => [p.user_id, p]));
+          const mappedUsers = profiles.map(p => mapProfileToUser(p, profsMap.get(p.id)));
+          if (mappedUsers.length > 0) {
+            saveStoredUsers(mappedUsers);
+            return mappedUsers;
+          }
+        }
+      } catch (err) {
+        console.warn('Exceção ao obter perfis do Supabase, utilizando cache local:', err);
+      }
     }
 
-    const { data: professionals } = await supabase
-      .from('professionals')
-      .select('*');
-
-    const profsMap = new Map((professionals || []).map(p => [p.user_id, p]));
-
-    return (profiles || []).map(p => mapProfileToUser(p, profsMap.get(p.id)));
+    return getStoredUsers();
   },
 
   /**

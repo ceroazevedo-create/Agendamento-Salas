@@ -3,7 +3,14 @@ import { Booking, User, RoomId, Room, BlockedSlot, AuditLog, SystemConfig, Payme
 import { bookingService } from '../services/bookingService';
 import { authService } from '../services/authService';
 import { clientService } from '../services/clientService';
-import { getStoredAuditLogs, getSystemConfig, saveSystemConfig } from '../services/storageService';
+import { 
+  getStoredAuditLogs, 
+  getSystemConfig, 
+  saveSystemConfig,
+  getStoredBookings,
+  getStoredUsers,
+  getStoredBlockedSlots
+} from '../services/storageService';
 import { INITIAL_HOURLY_RATE, INITIAL_DAILY_RATE, INITIAL_PERIOD_RATES, getClosingHourForDate, SATURDAY_HOURS_END } from '../constants';
 import { Button } from './Button';
 import { Modal } from './Modal';
@@ -140,21 +147,54 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
   const loadAdminData = async () => {
     setIsLoading(true);
     try {
-      const [allBookings, allProfiles, allRooms, allBlocks] = await Promise.all([
+      const [bookingsRes, profilesRes, roomsRes, blocksRes] = await Promise.allSettled([
         bookingService.getAllBookingsWithCancelled(),
         authService.getAllProfiles(),
         bookingService.getRooms(),
         bookingService.getBlockedSlots()
       ]);
 
-      setBookings(allBookings);
-      setUsers(allProfiles);
-      setRooms(allRooms);
-      setBlocks(allBlocks);
+      if (bookingsRes.status === 'fulfilled' && bookingsRes.value) {
+        setBookings(bookingsRes.value);
+      } else {
+        if (bookingsRes.status === 'rejected') {
+          console.warn('Aviso: falha ao carregar reservas do Supabase, usando local:', bookingsRes.reason);
+        }
+        setBookings(getStoredBookings());
+      }
+
+      if (profilesRes.status === 'fulfilled' && profilesRes.value) {
+        setUsers(profilesRes.value);
+      } else {
+        if (profilesRes.status === 'rejected') {
+          console.warn('Aviso: falha ao carregar perfis do Supabase, usando local:', profilesRes.reason);
+        }
+        setUsers(getStoredUsers());
+      }
+
+      if (roomsRes.status === 'fulfilled' && roomsRes.value) {
+        setRooms(roomsRes.value);
+      }
+
+      if (blocksRes.status === 'fulfilled' && blocksRes.value) {
+        setBlocks(blocksRes.value);
+      } else {
+        if (blocksRes.status === 'rejected') {
+          console.warn('Aviso: falha ao carregar bloqueios do Supabase, usando local:', blocksRes.reason);
+        }
+        setBlocks(getStoredBlockedSlots());
+      }
+
       setAuditLogs(getStoredAuditLogs());
       setConfig(getSystemConfig());
     } catch (err: any) {
-      addToast('Erro ao carregar painel administrativo.', 'error');
+      console.error('Erro inesperado ao carregar painel administrativo:', err);
+      // Garante que mesmo em erro fatal os dados locais sejam montados
+      setBookings(getStoredBookings());
+      setUsers(getStoredUsers());
+      setBlocks(getStoredBlockedSlots());
+      setAuditLogs(getStoredAuditLogs());
+      setConfig(getSystemConfig());
     } finally {
       setIsLoading(false);
     }
