@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Booking, RoomId, User, Client, BlockedSlot, BookingType, Room, PeriodShift } from '../types';
 import { bookingService } from '../services/bookingService';
 import { clientService } from '../services/clientService';
+import { getStoredBookings, getStoredBlockedSlots } from '../services/storageService';
 import { 
   DAYS_OF_WEEK, HOLIDAYS, getClosingHourForDate, SATURDAY_HOURS_END,
   BOOKING_PERIODS, getPeriodConfig, INITIAL_PERIOD_RATES 
@@ -70,7 +71,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
 
   const loadData = async () => {
     try {
-      const [allBookings, allBlocks, allRooms, holidays, globalHolidays] = await Promise.all([
+      const [bookingsRes, blocksRes, roomsRes, holidaysRes, globalHolidaysRes] = await Promise.allSettled([
         bookingService.getAllBookings(),
         bookingService.getBlockedSlots(),
         bookingService.getRooms(),
@@ -78,27 +79,51 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
         bookingService.isGlobalHolidaysAllowed()
       ]);
 
-      setBookings(allBookings);
-      setBlockedSlots(allBlocks);
-      setRooms(allRooms);
-      setUnblockedHolidays(holidays);
-      setIsGlobalAllowed(globalHolidays);
-
-      if (user.role === 'USER') {
-        const clients = await clientService.getClientsByProfessional(user.id);
-        setMyClients(clients);
-        if (clients.length > 0 && !selectedClientId) {
-          setSelectedClientId(clients[0].id);
-        }
+      if (bookingsRes.status === 'fulfilled' && bookingsRes.value) {
+        setBookings(bookingsRes.value);
       } else {
-        const allClients = await clientService.getAllClients();
-        setMyClients(allClients);
-        if (allClients.length > 0 && !selectedClientId) {
-          setSelectedClientId(allClients[0].id);
+        setBookings(getStoredBookings().filter(b => b.paymentStatus !== 'CANCELLED'));
+      }
+
+      if (blocksRes.status === 'fulfilled' && blocksRes.value) {
+        setBlockedSlots(blocksRes.value);
+      } else {
+        setBlockedSlots(getStoredBlockedSlots());
+      }
+
+      if (roomsRes.status === 'fulfilled' && roomsRes.value) {
+        setRooms(roomsRes.value);
+      }
+
+      if (holidaysRes.status === 'fulfilled' && holidaysRes.value) {
+        setUnblockedHolidays(holidaysRes.value);
+      }
+
+      if (globalHolidaysRes.status === 'fulfilled') {
+        setIsGlobalAllowed(globalHolidaysRes.value);
+      }
+
+      try {
+        if (user.role === 'USER') {
+          const clients = await clientService.getClientsByProfessional(user.id);
+          setMyClients(clients);
+          if (clients.length > 0 && !selectedClientId) {
+            setSelectedClientId(clients[0].id);
+          }
+        } else {
+          const allClients = await clientService.getAllClients();
+          setMyClients(allClients);
+          if (allClients.length > 0 && !selectedClientId) {
+            setSelectedClientId(allClients[0].id);
+          }
         }
+      } catch (clientErr) {
+        console.warn('Aviso ao carregar clientes do profissional:', clientErr);
       }
     } catch (err: any) {
-      console.error(err);
+      console.error('Erro ao carregar dados do calendário:', err);
+      setBookings(getStoredBookings().filter(b => b.paymentStatus !== 'CANCELLED'));
+      setBlockedSlots(getStoredBlockedSlots());
     }
   };
 

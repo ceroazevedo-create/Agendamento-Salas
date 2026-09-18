@@ -60,14 +60,19 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
   const loadUserData = async () => {
     setIsLoading(true);
     try {
-      const [allMyBookings, myClients] = await Promise.all([
+      const [bookingsRes, clientsRes] = await Promise.allSettled([
         bookingService.getBookingsByProfessional(user.id),
         clientService.getClientsByProfessional(user.id)
       ]);
-      setBookings(allMyBookings);
-      setClients(myClients);
+
+      if (bookingsRes.status === 'fulfilled' && bookingsRes.value) {
+        setBookings(bookingsRes.value);
+      }
+      if (clientsRes.status === 'fulfilled' && clientsRes.value) {
+        setClients(clientsRes.value);
+      }
     } catch (err: any) {
-      addToast('Erro ao carregar dados do profissional.', 'error');
+      console.warn('Aviso ao carregar dados do profissional:', err);
     } finally {
       setIsLoading(false);
     }
