@@ -1,1 +1,21 @@
 
+name: Supabase Keep Alive
+
+on:
+  schedule:
+    - cron: '0 09 * * *'
+      timezone: "America/Sao_Paulo"
+
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Consultar Supabase
+        run: |
+          curl -X GET \
+            "${{ secrets.SUPABASE_URL }}/rest/v1/keep_alive?select=id&limit=1" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}"
