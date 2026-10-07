@@ -11,10 +11,16 @@ import {
 export const ensureSeededData = () => {
   if (typeof window === 'undefined') return;
 
-  // Remove qualquer dado residual de sessão legada para garantir segurança
+  // Remove qualquer dado residual de sessão ou testes legados para garantir ambiente limpo de produção
   try {
     localStorage.removeItem('locapsico_session_v2');
     localStorage.removeItem('locapsico_users_v2');
+    localStorage.removeItem('locapsico_clients_v2');
+    localStorage.removeItem('locapsico_bookings_v2');
+    localStorage.removeItem('locapsico_blocked_v2');
+    localStorage.removeItem('locapsico_audit_v2');
+    localStorage.removeItem('locapsico_config_v2');
+    localStorage.removeItem('locapsico_seeded_v2');
   } catch {}
 
   const isSeeded = localStorage.getItem(STORAGE_KEYS.SEEDED);

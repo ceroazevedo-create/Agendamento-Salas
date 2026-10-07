@@ -121,12 +121,12 @@ export function getPeriodConfig(period: PeriodShift, dateOrDayOfWeek?: Date | nu
 }
 
 export const STORAGE_KEYS = {
-  CLIENTS: 'locapsico_clients_v2',
-  BOOKINGS: 'locapsico_bookings_v2',
-  BLOCKED_SLOTS: 'locapsico_blocked_v2',
-  AUDIT_LOGS: 'locapsico_audit_v2',
-  CONFIG: 'locapsico_config_v2',
-  SEEDED: 'locapsico_seeded_v2'
+  CLIENTS: 'locapsico_clients_v3_prod',
+  BOOKINGS: 'locapsico_bookings_v3_prod',
+  BLOCKED_SLOTS: 'locapsico_blocked_v3_prod',
+  AUDIT_LOGS: 'locapsico_audit_v3_prod',
+  CONFIG: 'locapsico_config_v3_prod',
+  SEEDED: 'locapsico_seeded_v3_prod'
 };
 
 export const HOLIDAYS = [
