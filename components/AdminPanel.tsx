@@ -28,7 +28,7 @@ import {
 } from 'lucide-react';
 import { useToast } from './Toast';
 import { checkPasswordStrength, getPasswordValidationMessage } from '../utils/passwordSecurity';
-import { backupService, BackupCounts } from '../services/backupService';
+import { backupService, BackupCounts, BackupMode } from '../services/backupService';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -145,9 +145,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
   } | null>(null);
 
   // Backup e Segurança State
-  const [isGeneratingBackup, setIsGeneratingBackup] = useState<boolean>(false);
+  const [generatingBackupMode, setGeneratingBackupMode] = useState<BackupMode | null>(null);
   const [backupError, setBackupError] = useState<string | null>(null);
   const [lastBackupResult, setLastBackupResult] = useState<{
+    mode: BackupMode;
+    backupType: 'COMPLETO' | 'ANONIMIZADO';
     fileName: string;
     generatedAt: string;
     totalRecords: number;
@@ -603,30 +605,33 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
     addToast('Credenciais copiadas para a área de transferência!', 'success');
   };
 
-  // Gerar e Baixar Backup Completo do Sistema (Somente Leitura)
-  const handleRunBackupNow = async () => {
-    if (isGeneratingBackup) return;
-    setIsGeneratingBackup(true);
+  // Gerar e Baixar Backup do Sistema (Somente Leitura: Completo ou Anonimizado)
+  const handleRunBackupNow = async (mode: BackupMode = 'full') => {
+    if (generatingBackupMode !== null) return;
+    setGeneratingBackupMode(mode);
     setBackupError(null);
 
     try {
-      const backupPayload = await backupService.fetchSystemBackup(adminActor);
-      const fileName = backupService.downloadBackupFile(backupPayload);
+      const backupPayload = await backupService.fetchSystemBackup(adminActor, mode);
+      const fileName = backupService.downloadBackupFile(backupPayload, mode);
+      const label = mode === 'anonymized' ? 'ANONIMIZADO' : 'COMPLETO';
 
       setLastBackupResult({
+        mode,
+        backupType: label,
         fileName,
         generatedAt: backupPayload.metadata.generatedAt,
         totalRecords: backupPayload.metadata.totalRecords,
         counts: backupPayload.metadata.counts
       });
 
-      addToast(`Backup concluído com sucesso! Arquivo ${fileName} baixado.`, 'success');
+      addToast(`Backup ${label} concluído! Arquivo ${fileName} baixado.`, 'success');
     } catch (err: any) {
       const msg = err?.message || 'Não foi possível gerar o backup no momento.';
       setBackupError(msg);
       addToast(msg, 'error');
     } finally {
-      setIsGeneratingBackup(false);
+      setGeneratingBackupMode(null);
     }
   };
 
@@ -1934,7 +1939,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
 
       {/* ================= 9.5. BACKUP E SEGURANÇA ================= */}
       {activeTab === 'backup' && (
-        <div className="max-w-4xl mx-auto space-y-6 animate-fade-in">
+        <div className="max-w-5xl mx-auto space-y-6 animate-fade-in">
           {/* Cabeçalho Principal */}
           <div className="bg-white rounded-3xl p-6 lg:p-8 border border-gray-100 shadow-sm space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-6">
@@ -1949,54 +1954,139 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                       <ShieldCheck size={12} /> Exclusivo Administrador
                     </span>
                   </div>
-                  <p className="text-xs text-gray-500 mt-1 leading-relaxed max-w-2xl">
-                    Gere e faça o download imediato de uma cópia completa de segurança de todos os dados importantes armazenados no banco de dados do LocaPsico.
+                  <p className="text-xs text-gray-500 mt-1 leading-relaxed max-w-3xl">
+                    Escolha abaixo a modalidade de exportação desejada. O sistema oferece o <strong>Backup Completo</strong> (para futura restauração real dos dados) e o <strong>Backup Anonimizado</strong> (com mascaramento de dados pessoais para auditoria, suporte técnico ou conformidade LGPD).
                   </p>
                 </div>
               </div>
             </div>
 
-            {/* Card Principal de Ação: Fazer backup agora */}
-            <div className="p-6 rounded-3xl bg-teal-50/50 border border-teal-200/80 flex flex-col md:flex-row md:items-center justify-between gap-6">
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-teal-600"></span>
-                  <h4 className="text-base font-black text-gray-900">
-                    Exportação Completa de Dados (.JSON)
-                  </h4>
+            {/* Grid com as 2 Modalidades de Backup */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* OPÇÃO 1: BACKUP COMPLETO */}
+              <div className="p-6 rounded-3xl bg-teal-50/60 border-2 border-teal-200 flex flex-col justify-between gap-5">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-teal-600 text-white text-[10px] font-black uppercase tracking-wider">
+                      <CheckCircle2 size={12} /> 1. Backup Completo
+                    </span>
+                    <span className="text-[10px] font-black uppercase tracking-wider text-teal-800 bg-white px-2.5 py-1 rounded-lg border border-teal-200">
+                      Restauração Integral
+                    </span>
+                  </div>
+
+                  <div>
+                    <h4 className="text-base font-black text-gray-900">
+                      Dados Originais Completos para Restauração
+                    </h4>
+                    <p className="text-xs text-gray-600 leading-relaxed mt-1">
+                      Contém todos os registros reais necessários para reconstruir integralmente o sistema no futuro. Mantém intactos CPFs, telefones, e-mails, nomes de profissionais e pacientes, agendamentos e histórico financeiro.
+                    </p>
+                  </div>
+
+                  {/* Exemplo técnico claro */}
+                  <div className="p-3.5 rounded-2xl bg-white border border-teal-100 space-y-1.5 text-[11px]">
+                    <span className="font-black text-teal-800 uppercase tracking-wider block text-[10px]">
+                      Formato dos Dados no Backup Completo:
+                    </span>
+                    <pre className="font-mono text-[10px] text-gray-700 overflow-x-auto leading-relaxed">
+{`"cpf": "11111111111",
+"phone": "11957865636",
+"email": "admin@admin.com.br"`}
+                    </pre>
+                    <p className="text-[10px] text-gray-500 pt-1 border-t border-gray-100">
+                      <strong>Segurança:</strong> Não inclui senhas, tokens, Service Role Key, chaves de API, secrets ou variáveis de ambiente.
+                    </p>
+                  </div>
+
+                  <div className="text-[10px] text-teal-800 font-mono bg-teal-100/60 px-3 py-1.5 rounded-xl border border-teal-200/70 truncate">
+                    Arquivo: locapsico_backup_completo_YYYY-MM-DD_HH-mm-ss.json
+                  </div>
                 </div>
-                <p className="text-xs text-gray-600 leading-relaxed max-w-xl">
-                  O arquivo gerado inclui todos os cadastros de usuários/perfis, profissionais, pacientes, salas e tarifas, agendamentos/locações, histórico de pagamentos, bloqueios de agenda, configurações e logs de auditoria.
-                </p>
-                <div className="flex flex-wrap items-center gap-3 pt-1 text-[11px] font-bold text-teal-800">
-                  <span className="inline-flex items-center gap-1 bg-white px-2.5 py-1 rounded-lg border border-teal-100">
-                    <CheckCircle2 size={12} className="text-teal-600" /> Operação 100% Somente Leitura
-                  </span>
-                  <span className="inline-flex items-center gap-1 bg-white px-2.5 py-1 rounded-lg border border-teal-100">
-                    <Lock size={12} className="text-teal-600" /> Sem Exposição de Senhas ou Chaves Secretas
-                  </span>
+
+                <div className="pt-2">
+                  <Button
+                    variant="primary"
+                    disabled={generatingBackupMode !== null}
+                    onClick={() => handleRunBackupNow('full')}
+                    className="w-full py-3.5 text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2.5 shadow-md shadow-teal-600/20"
+                  >
+                    {generatingBackupMode === 'full' ? (
+                      <>
+                        <RefreshCw size={16} className="animate-spin" />
+                        <span>Gerando backup completo...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download size={16} />
+                        <span>Baixar Backup Completo</span>
+                      </>
+                    )}
+                  </Button>
                 </div>
               </div>
 
-              <div className="shrink-0">
-                <Button
-                  variant="primary"
-                  disabled={isGeneratingBackup}
-                  onClick={handleRunBackupNow}
-                  className="w-full md:w-auto px-7 py-3.5 text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2.5 shadow-md shadow-teal-600/20"
-                >
-                  {isGeneratingBackup ? (
-                    <>
-                      <RefreshCw size={16} className="animate-spin" />
-                      <span>Gerando backup...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Download size={16} />
-                      <span>Fazer backup agora</span>
-                    </>
-                  )}
-                </Button>
+              {/* OPÇÃO 2: BACKUP ANONIMIZADO */}
+              <div className="p-6 rounded-3xl bg-slate-50 border-2 border-slate-200 flex flex-col justify-between gap-5">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-800 text-white text-[10px] font-black uppercase tracking-wider">
+                      <EyeOff size={12} /> 2. Backup Anonimizado
+                    </span>
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-700 bg-white px-2.5 py-1 rounded-lg border border-slate-200">
+                      Proteção LGPD / Análise
+                    </span>
+                  </div>
+
+                  <div>
+                    <h4 className="text-base font-black text-gray-900">
+                      Dados Pessoais Mascarados (Sem Identificação)
+                    </h4>
+                    <p className="text-xs text-gray-600 leading-relaxed mt-1">
+                      Preserva a estrutura das tabelas, IDs relacionais, contagens, datas, horários e valores financeiros, mas substitui nomes, CPFs, telefones, e-mails, CRPs e anotações por máscaras anônimas.
+                    </p>
+                  </div>
+
+                  {/* Exemplo técnico claro */}
+                  <div className="p-3.5 rounded-2xl bg-white border border-slate-200 space-y-1.5 text-[11px]">
+                    <span className="font-black text-slate-700 uppercase tracking-wider block text-[10px]">
+                      Formato dos Dados no Backup Anonimizado:
+                    </span>
+                    <pre className="font-mono text-[10px] text-gray-700 overflow-x-auto leading-relaxed">
+{`"cpf": "***.***.***-**",
+"phone": "(**) *****-****",
+"email": "profissional_1@anonimizado.local"`}
+                    </pre>
+                    <p className="text-[10px] text-amber-800 pt-1 border-t border-gray-100">
+                      <strong>Atenção:</strong> Indicado para auditoria externa, testes ou diagnóstico técnico. <strong>Não deve ser usado para restaurar produção.</strong>
+                    </p>
+                  </div>
+
+                  <div className="text-[10px] text-slate-700 font-mono bg-slate-200/60 px-3 py-1.5 rounded-xl border border-slate-300/70 truncate">
+                    Arquivo: locapsico_backup_anonimizado_YYYY-MM-DD_HH-mm-ss.json
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    disabled={generatingBackupMode !== null}
+                    onClick={() => handleRunBackupNow('anonymized')}
+                    className="w-full py-3.5 px-6 rounded-2xl bg-slate-800 hover:bg-slate-900 disabled:opacity-50 text-white text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2.5 shadow-md shadow-slate-900/10"
+                  >
+                    {generatingBackupMode === 'anonymized' ? (
+                      <>
+                        <RefreshCw size={16} className="animate-spin" />
+                        <span>Gerando backup anonimizado...</span>
+                      </>
+                    ) : (
+                      <>
+                        <EyeOff size={16} />
+                        <span>Baixar Backup Anonimizado</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -2020,11 +2110,24 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                   <div className="flex items-center gap-2.5 text-emerald-900">
                     <CheckCircle2 size={20} className="text-emerald-600 shrink-0" />
                     <div>
-                      <span className="text-xs font-black uppercase tracking-wider block">
-                        Backup Gerado e Baixado com Sucesso!
-                      </span>
-                      <span className="text-[11px] text-emerald-700 font-semibold">
-                        Arquivo: <strong className="font-mono">{lastBackupResult.fileName}</strong>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-black uppercase tracking-wider">
+                          Backup {lastBackupResult.backupType} Gerado e Baixado com Sucesso!
+                        </span>
+                        <span
+                          className={`text-[10px] font-black px-2 py-0.5 rounded-md uppercase ${
+                            lastBackupResult.mode === 'anonymized'
+                              ? 'bg-slate-800 text-white'
+                              : 'bg-teal-700 text-white'
+                          }`}
+                        >
+                          {lastBackupResult.mode === 'anonymized'
+                            ? 'Dados Anonimizados (LGPD)'
+                            : 'Pronto para Restauração'}
+                        </span>
+                      </div>
+                      <span className="text-[11px] text-emerald-700 font-semibold block mt-0.5">
+                        Arquivo salvo: <strong className="font-mono">{lastBackupResult.fileName}</strong>
                       </span>
                     </div>
                   </div>
@@ -2078,29 +2181,27 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
               </div>
             )}
 
-            {/* Detalhamento Técnico e Garantias de Segurança */}
+            {/* Comparativo Direto e Garantias de Segurança */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
               <div className="p-5 rounded-2xl bg-gray-50 border border-gray-100 space-y-2.5 text-xs">
                 <h5 className="font-black text-gray-900 uppercase tracking-wider text-[11px] flex items-center gap-2">
-                  <Database size={14} className="text-teal-600" /> Tabelas Incluídas no Backup
+                  <Database size={14} className="text-teal-600" /> Diferença Entre os Dois Arquivos
                 </h5>
                 <ul className="space-y-1.5 text-gray-600">
-                  <li>• <strong>profiles</strong> e <strong>professionals</strong> (Usuários e dados profissionais)</li>
-                  <li>• <strong>clients</strong> (Cadastro de pacientes vinculados)</li>
-                  <li>• <strong>rooms</strong> e <strong>settings</strong> (Salas, tarifas e parâmetros globais)</li>
-                  <li>• <strong>bookings</strong> e <strong>payments</strong> (Reservas, valores e histórico financeiro)</li>
-                  <li>• <strong>blocked_slots</strong> e <strong>audit_logs</strong> (Bloqueios e trilha de auditoria)</li>
+                  <li>• <strong>Backup Completo:</strong> Preserva nomes, CPFs, telefones, e-mails e observações reais. Indispensável para restaurar os dados do sistema.</li>
+                  <li>• <strong>Backup Anonimizado:</strong> Substitui dados pessoais identificáveis por máscaras (ex: <code>***.***.***-**</code>), mantendo IDs e valores financeiros para conferência segura.</li>
+                  <li>• <strong>Mesma Cobertura:</strong> Ambos exportam as 9 tabelas públicas (<code>profiles</code>, <code>professionals</code>, <code>clients</code>, <code>rooms</code>, <code>bookings</code>, <code>payments</code>, <code>blocked_slots</code>, <code>settings</code> e <code>audit_logs</code>).</li>
                 </ul>
               </div>
 
               <div className="p-5 rounded-2xl bg-gray-50 border border-gray-100 space-y-2.5 text-xs">
                 <h5 className="font-black text-gray-900 uppercase tracking-wider text-[11px] flex items-center gap-2">
-                  <ShieldCheck size={14} className="text-teal-600" /> Proteção e Integridade
+                  <ShieldCheck size={14} className="text-teal-600" /> Proteção e Sigilo em Ambos
                 </h5>
                 <ul className="space-y-1.5 text-gray-600">
                   <li>• <strong>Acesso Restrito:</strong> Validado por token de sessão e perfil de Administrador no servidor.</li>
-                  <li>• <strong>Operação Segura:</strong> Executa exclusivamente consultas de leitura (<code>SELECT</code>), sem alterar ou apagar nenhum dado.</li>
-                  <li>• <strong>Sigilo de Credenciais:</strong> Nenhuma senha ou chave privada do servidor é incluída no arquivo.</li>
+                  <li>• <strong>Operação 100% Somente Leitura:</strong> Executa apenas consultas <code>SELECT</code> no Supabase, sem alterar nenhum registro.</li>
+                  <li>• <strong>Zero Credenciais:</strong> Nenhuma senha, hash, token, Service Role Key, chave de API ou variável de ambiente é incluída em nenhum dos arquivos.</li>
                 </ul>
               </div>
             </div>
