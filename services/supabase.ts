@@ -6,12 +6,22 @@ import { createClient } from '@supabase/supabase-js';
  * e chaves de produção configuradas.
  */
 
+declare global {
+  interface ImportMetaEnv {
+    readonly VITE_SUPABASE_URL?: string;
+    readonly VITE_SUPABASE_ANON_KEY?: string;
+  }
+  interface ImportMeta {
+    readonly env: ImportMetaEnv;
+  }
+}
+
 // Valores padrão para o projeto sistema-salas (gqpavuqopukyfeyqyrxc)
 const defaultUrl = 'https://gqpavuqopukyfeyqyrxc.supabase.co';
 const defaultAnonKey = 'sb_publishable_idoSyVhNDWy33hjn4xCUpw_wjpcB8CS';
 
-const envUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined) || defaultUrl;
-const envAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) || defaultAnonKey;
+const envUrl = import.meta.env.VITE_SUPABASE_URL || defaultUrl;
+const envAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || defaultAnonKey;
 
 // Funções para sanitizar URL e Chave do Supabase
 function sanitizeUrl(url?: string): string | null {
