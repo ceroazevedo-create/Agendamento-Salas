@@ -1,6 +1,15 @@
 import { supabase } from './supabase';
-import { User } from '../types';
+import { User, Client, Booking, BlockedSlot, AuditLog, RoomId, PaymentStatus, BookingType } from '../types';
 import { format } from 'date-fns';
+import {
+  saveStoredClients,
+  saveStoredBookings,
+  saveStoredBlockedSlots,
+  saveStoredAuditLogs,
+  getSystemConfig,
+  saveSystemConfig,
+  addAuditLog
+} from './storageService';
 
 export type BackupMode = 'full' | 'anonymized';
 
@@ -47,6 +56,45 @@ export interface SystemBackupPayload {
     audit_logs: any[];
   };
 }
+
+export interface BackupValidationResult {
+  valid: boolean;
+  isAnonymizedDetected?: boolean;
+  error?: string;
+  fileName?: string;
+  payload?: SystemBackupPayload;
+  summary?: {
+    system: string;
+    schemaVersion: string;
+    backupType: 'COMPLETO';
+    generatedAt: string;
+    generatedByName: string;
+    generatedByEmail: string;
+    totalRecords: number;
+    counts: BackupCounts;
+  };
+}
+
+export interface RestoreExecutionResult {
+  success: boolean;
+  message: string;
+  restoredAt: string;
+  totalRestored: number;
+  counts: BackupCounts;
+  safetyBackupFileName?: string;
+}
+
+const REQUIRED_TABLES: Array<keyof SystemBackupPayload['data']> = [
+  'profiles',
+  'professionals',
+  'clients',
+  'rooms',
+  'bookings',
+  'payments',
+  'blocked_slots',
+  'settings',
+  'audit_logs'
+];
 
 const FORBIDDEN_CREDENTIAL_KEYS = new Set([
   'password',
@@ -183,10 +231,10 @@ export function anonymizeBackupData(rawData: SystemBackupPayload['data']): Syste
       masked.userName = (clean.professional_id && userAliasMap.get(String(clean.professional_id))) || 'Profissional Anonimizado';
     }
     if ('client_name' in masked && masked.client_name) {
-      masked.client_name = (clean.client_id && clientAliasMap.get(String(clean.client_id))) || 'Paciente Anonimizado';
+      masked.client_name = (clean.client_id && clientAliasMap.get(String(client_id_safe(clean)))) || 'Paciente Anonimizado';
     }
     if ('clientName' in masked && masked.clientName) {
-      masked.clientName = (clean.client_id && clientAliasMap.get(String(clean.client_id))) || 'Paciente Anonimizado';
+      masked.clientName = (clean.client_id && clientAliasMap.get(String(client_id_safe(clean)))) || 'Paciente Anonimizado';
     }
 
     return masked;
@@ -228,9 +276,142 @@ export function anonymizeBackupData(rawData: SystemBackupPayload['data']): Syste
   };
 }
 
+function client_id_safe(clean: Record<string, any>): string {
+  return String(clean.client_id || '');
+}
+
+/**
+ * Sincroniza o cache local (localStorage) após uma restauração bem-sucedida
+ * para que a interface reflita imediatamente os registros restaurados.
+ */
+function syncLocalStorageFromBackupData(data: SystemBackupPayload['data']) {
+  try {
+    const profilesMap = new Map<string, any>();
+    for (const p of data.profiles || []) {
+      if (p?.id) profilesMap.set(String(p.id), p);
+    }
+
+    const clientsMap = new Map<string, any>();
+    const mappedClients: Client[] = (data.clients || []).map((c: any) => {
+      clientsMap.set(String(c.id), c);
+      return {
+        id: String(c.id),
+        professionalId: String(c.professional_id || ''),
+        name: String(c.full_name || c.name || 'Paciente'),
+        cpf: c.cpf || '',
+        birthDate: c.birth_date || undefined,
+        phone: c.phone || '',
+        whatsapp: c.whatsapp || c.phone || '',
+        email: c.email || '',
+        address: c.address || '',
+        notes: c.notes || '',
+        createdAt: c.created_at || new Date().toISOString(),
+        status: (c.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE') as 'ACTIVE' | 'INACTIVE'
+      };
+    });
+    saveStoredClients(mappedClients);
+
+    const mappedBookings: Booking[] = (data.bookings || []).map((b: any) => {
+      const prof = profilesMap.get(String(b.professional_id || ''));
+      const cli = b.client_id ? clientsMap.get(String(b.client_id)) : null;
+      const startHour = Number(b.start_time ?? b.hour ?? 7);
+      const endHour = Number(b.end_time ?? b.end_time_hour ?? startHour + 1);
+      const duration = Number(b.total_hours ?? b.duration_hours ?? Math.max(1, endHour - startHour));
+      const roomId: RoomId =
+        String(b.room_id || '').trim().toLowerCase() === 'sala 2' ? 'Sala 2' : 'Sala 1';
+      const rawType = String(b.booking_type || b.type || 'HOURLY').toUpperCase();
+      const type: BookingType = rawType === 'PERIOD' || duration >= 4 ? 'PERIOD' : 'HOURLY';
+      const paymentStatus: PaymentStatus = (b.payment_status ||
+        (b.status === 'cancelled' ? 'CANCELLED' : 'PENDING')) as PaymentStatus;
+
+      return {
+        id: String(b.id),
+        userId: String(b.professional_id || ''),
+        userEmail: prof?.email || '',
+        userName: prof?.full_name || 'Profissional',
+        clientId: b.client_id ? String(b.client_id) : undefined,
+        clientName: cli?.full_name || undefined,
+        roomId,
+        date: String(b.booking_date || b.date || '').split('T')[0],
+        hour: startHour,
+        durationHours: duration,
+        endTimeHour: endHour,
+        type,
+        periodShift: b.period_shift || undefined,
+        periodName: b.period_name || undefined,
+        priceAtBooking: Number(b.hourly_rate ?? 40),
+        totalAmount: Number(b.total_amount ?? 40),
+        paymentStatus,
+        createdAt: b.created_at || new Date().toISOString(),
+        notes: b.notes || undefined,
+        paidAt: b.paid_at || undefined,
+        paidNotes: b.paid_notes || undefined,
+        paidByAdmin: b.paid_by_admin || undefined
+      };
+    });
+    saveStoredBookings(mappedBookings);
+
+    const mappedBlocks: BlockedSlot[] = (data.blocked_slots || []).map((blk: any) => ({
+      id: String(blk.id),
+      roomId: (blk.room_id || 'ALL') as RoomId | 'ALL',
+      date: String(blk.blocked_date || '').split('T')[0],
+      startHour: Number(blk.start_time ?? 7),
+      endHour: Number(blk.end_time ?? 22),
+      reason: String(blk.reason || 'Bloqueio Administrativo'),
+      createdAt: blk.created_at || new Date().toISOString(),
+      createdBy: String(blk.created_by || 'Administração')
+    }));
+    saveStoredBlockedSlots(mappedBlocks);
+
+    const mappedLogs: AuditLog[] = (data.audit_logs || []).map((log: any) => ({
+      id: String(log.id || 'aud-' + Date.now()),
+      userId: String(log.user_id || ''),
+      userName: String(log.user_name || 'Administrador'),
+      action: String(log.action || 'Ação'),
+      details: String(log.details || ''),
+      timestamp: log.timestamp || new Date().toISOString()
+    }));
+    saveStoredAuditLogs(mappedLogs);
+
+    const currentConfig = getSystemConfig();
+    if (Array.isArray(data.settings) && data.settings.length > 0) {
+      const s = data.settings[0];
+      currentConfig.openHour = Number(s.open_hour ?? currentConfig.openHour ?? 7);
+      currentConfig.closeHour = Number(s.close_hour ?? currentConfig.closeHour ?? 22);
+      currentConfig.cancellationLimitHours = Number(
+        s.cancellation_limit_hours ?? currentConfig.cancellationLimitHours ?? 24
+      );
+      if (typeof s.allow_holidays_global === 'boolean') {
+        currentConfig.allowHolidaysGlobal = s.allow_holidays_global;
+      }
+      if (Array.isArray(s.unblocked_holidays)) {
+        currentConfig.unblocked_holidays = s.unblocked_holidays;
+      }
+    }
+    if (Array.isArray(data.rooms) && data.rooms.length > 0) {
+      currentConfig.rooms = data.rooms.map((r: any) => ({
+        id: (String(r.id) === 'Sala 2' ? 'Sala 2' : 'Sala 1') as RoomId,
+        name: String(r.name || r.id || 'Sala'),
+        description: String(r.description || ''),
+        hourlyRate: Number(r.hourly_rate ?? 40),
+        dailyRate: Number(r.period_rate ?? 350),
+        morningRate: Number(r.morning_rate ?? 150),
+        afternoonRate: Number(r.afternoon_rate ?? 180),
+        nightRate: Number(r.night_rate ?? 130),
+        status: (r.status === 'MAINTENANCE' ? 'MAINTENANCE' : 'ACTIVE') as 'ACTIVE' | 'MAINTENANCE',
+        openHour: Number(r.opening_time ?? 7),
+        closeHour: Number(r.closing_time ?? 22),
+        notes: r.notes || undefined
+      }));
+    }
+    saveSystemConfig(currentConfig);
+  } catch (e) {
+    console.warn('Aviso ao atualizar cache local após restauração:', e);
+  }
+}
+
 /**
  * Fallback seguro de leitura direta via sessão autenticada do administrador no Supabase
- * (utilizado apenas caso a aplicação esteja sendo acessada via hospedagem estática sem Pages Functions, ex: GitHub Pages).
  */
 async function generateClientSideAdminBackup(
   adminUser: User,
@@ -314,6 +495,162 @@ async function generateClientSideAdminBackup(
   };
 }
 
+/**
+ * Fallback seguro de restauração via cliente Supabase autenticado como Administrador
+ * (utilizado somente em ambientes puramente estáticos onde /api/admin/restore retorna 404).
+ */
+async function executeClientSideAdminRestore(
+  adminUser: User,
+  backupPayload: SystemBackupPayload
+): Promise<RestoreExecutionResult> {
+  if (!adminUser || adminUser.role !== 'ADMIN') {
+    throw new Error('Permissão negada. Apenas administradores podem restaurar o sistema.');
+  }
+
+  const d = backupPayload.data;
+
+  // 1. Limpeza das tabelas operacionais na ordem filha -> mãe (preservando profiles/admin)
+  await supabase.from('payments').delete().not('id', 'is', null);
+  await supabase.from('bookings').delete().not('id', 'is', null);
+  await supabase.from('blocked_slots').delete().not('id', 'is', null);
+  await supabase.from('clients').delete().not('id', 'is', null);
+
+  // 2. Restaurar settings
+  if (d.settings?.length > 0) {
+    await supabase.from('settings').upsert(d.settings.map(sanitizeRecordCredentials), { onConflict: 'id' });
+  }
+
+  // 3. Restaurar rooms
+  if (d.rooms?.length > 0) {
+    for (const r of d.rooms.map(sanitizeRecordCredentials)) {
+      const { error } = await supabase.from('rooms').upsert(r, { onConflict: 'id' });
+      if (error) {
+        const fb = { ...r };
+        delete fb.morning_rate;
+        delete fb.afternoon_rate;
+        delete fb.night_rate;
+        await supabase.from('rooms').upsert(fb, { onConflict: 'id' });
+      }
+    }
+  }
+
+  // 4. Restaurar profiles existentes (garantindo que o admin atual continue ativo e admin)
+  const { data: existingProfiles } = await supabase.from('profiles').select('id, email, role');
+  const existingProfileIds = new Set((existingProfiles || []).map((p: any) => String(p.id)));
+
+  const validProfilesToUpsert = (d.profiles || [])
+    .map(sanitizeRecordCredentials)
+    .filter((p: any) => p?.id && existingProfileIds.has(String(p.id)))
+    .map((p: any) => {
+      if (String(p.id) === adminUser.id || String(p.role).toLowerCase() === 'admin') {
+        return { ...p, role: 'admin', status: 'ACTIVE' };
+      }
+      return p;
+    });
+
+  if (validProfilesToUpsert.length > 0) {
+    await supabase.from('profiles').upsert(validProfilesToUpsert, { onConflict: 'id' });
+  }
+
+  // 5. Restaurar professionals vinculados
+  const validProfRows = (d.professionals || [])
+    .map(sanitizeRecordCredentials)
+    .filter((prof: any) => prof?.user_id && existingProfileIds.has(String(prof.user_id)));
+
+  if (validProfRows.length > 0) {
+    await supabase.from('professionals').upsert(validProfRows, { onConflict: 'user_id' });
+  }
+
+  // 6. Restaurar clients
+  const clientsToRestore = (d.clients || [])
+    .map(sanitizeRecordCredentials)
+    .map((c: any) => ({
+      ...c,
+      professional_id: existingProfileIds.has(String(c.professional_id)) ? c.professional_id : adminUser.id
+    }));
+
+  if (clientsToRestore.length > 0) {
+    await supabase.from('clients').upsert(clientsToRestore, { onConflict: 'id' });
+  }
+
+  // 7. Restaurar bookings (antes de blocked_slots)
+  const validClientIds = new Set(clientsToRestore.map((c: any) => String(c.id)));
+  const bookingsToRestore = (d.bookings || [])
+    .map(sanitizeRecordCredentials)
+    .map((b: any) => ({
+      ...b,
+      professional_id: existingProfileIds.has(String(b.professional_id)) ? b.professional_id : adminUser.id,
+      client_id: b.client_id && validClientIds.has(String(b.client_id)) ? b.client_id : null
+    }));
+
+  if (bookingsToRestore.length > 0) {
+    const { error: bErr } = await supabase.from('bookings').upsert(bookingsToRestore, { onConflict: 'id' });
+    if (bErr) {
+      for (const row of bookingsToRestore) {
+        const fb = { ...row };
+        delete fb.period_shift;
+        delete fb.period_name;
+        await supabase.from('bookings').upsert(fb, { onConflict: 'id' });
+      }
+    }
+  }
+
+  // 8. Restaurar blocked_slots
+  if (d.blocked_slots?.length > 0) {
+    await supabase.from('blocked_slots').upsert(d.blocked_slots.map(sanitizeRecordCredentials), { onConflict: 'id' });
+  }
+
+  // 9. Restaurar payments
+  const validBookingIds = new Set(bookingsToRestore.map((b: any) => String(b.id)));
+  const paymentsToRestore = (d.payments || [])
+    .map(sanitizeRecordCredentials)
+    .map((pay: any) => ({
+      ...pay,
+      professional_id: existingProfileIds.has(String(pay.professional_id)) ? pay.professional_id : adminUser.id,
+      booking_id: pay.booking_id && validBookingIds.has(String(pay.booking_id)) ? pay.booking_id : null
+    }));
+
+  if (paymentsToRestore.length > 0) {
+    await supabase.from('payments').upsert(paymentsToRestore, { onConflict: 'id' });
+  }
+
+  // 10. Registrar auditoria
+  await supabase.from('audit_logs').insert({
+    user_id: adminUser.id,
+    user_name: adminUser.name,
+    action: 'Restauração de Backup Completo',
+    details: `Backup Completo (gerado em ${backupPayload.metadata.generatedAt}) restaurado pelo administrador.`
+  });
+
+  syncLocalStorageFromBackupData(d);
+  addAuditLog(
+    adminUser.id,
+    adminUser.name,
+    'Restauração de Backup Completo',
+    `Backup Completo (gerado em ${backupPayload.metadata.generatedAt}) restaurado com sucesso.`
+  );
+
+  const counts: BackupCounts = {
+    profiles: validProfilesToUpsert.length || d.profiles.length,
+    professionals: validProfRows.length || d.professionals.length,
+    clients: clientsToRestore.length,
+    rooms: d.rooms.length,
+    bookings: bookingsToRestore.length,
+    payments: paymentsToRestore.length,
+    blocked_slots: d.blocked_slots.length,
+    settings: d.settings.length,
+    audit_logs: d.audit_logs.length + 1
+  };
+
+  return {
+    success: true,
+    message: 'Backup Completo restaurado com sucesso!',
+    restoredAt: new Date().toISOString(),
+    totalRestored: Object.values(counts).reduce((a, b) => a + b, 0),
+    counts
+  };
+}
+
 export const backupService = {
   /**
    * Solicita ao endpoint administrativo (/api/admin/backup?type=...) a geração do backup (somente leitura)
@@ -354,7 +691,6 @@ export const backupService = {
       if (response.ok && parsed?.metadata && parsed?.data) {
         const payload = parsed as SystemBackupPayload;
 
-        // Garante que se o modo solicitado foi anonimizado, os dados estejam anonimizados mesmo que um servidor antigo responda
         if (mode === 'anonymized' && !payload.metadata.isAnonymized) {
           payload.data = anonymizeBackupData(payload.data);
           payload.metadata.backupType = 'ANONIMIZADO';
@@ -374,7 +710,6 @@ export const backupService = {
         return payload;
       }
 
-      // Se for 404 (hospedagem puramente estática como GitHub Pages), utiliza fallback autenticado via RLS Admin
       if (response.status === 404 || !parsed) {
         return await generateClientSideAdminBackup(adminUser, mode);
       }
@@ -412,5 +747,282 @@ export const backupService = {
     URL.revokeObjectURL(url);
 
     return fileName;
+  },
+
+  /**
+   * Faz o download automático de um Backup Completo de Segurança Pré-Restauração.
+   */
+  downloadPreRestoreSafetyBackup: (backup: SystemBackupPayload): string => {
+    const timestamp = format(new Date(), 'yyyy-MM-dd_HH-mm-ss');
+    const fileName = `locapsico_backup_pre_restauracao_${timestamp}.json`;
+    const jsonContent = JSON.stringify(backup, null, 2);
+    const blob = new Blob([jsonContent], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', fileName);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    return fileName;
+  },
+
+  /**
+   * Valida um arquivo JSON selecionado pelo administrador antes de permitir a restauração.
+   * Garante que SOMENTE arquivos de BACKUP COMPLETO gerados pelo LocaPsico sejam aceitos,
+   * bloqueando qualquer tentativa de restaurar um Backup Anonimizado ou arquivo inválido.
+   */
+  validateBackupFileContent: (rawJsonText: string, fileName?: string): BackupValidationResult => {
+    if (!rawJsonText || !rawJsonText.trim()) {
+      return {
+        valid: false,
+        fileName,
+        error: 'O arquivo selecionado está vazio.'
+      };
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(rawJsonText);
+    } catch {
+      return {
+        valid: false,
+        fileName,
+        error: 'O arquivo selecionado não possui um formato JSON válido.'
+      };
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      return {
+        valid: false,
+        fileName,
+        error: 'Estrutura JSON inválida.'
+      };
+    }
+
+    const meta = parsed.metadata;
+    if (!meta || typeof meta !== 'object') {
+      return {
+        valid: false,
+        fileName,
+        error: 'Arquivo inválido: metadados do LocaPsico ("metadata") não encontrados.'
+      };
+    }
+
+    if (meta.system !== 'LocaPsico') {
+      return {
+        valid: false,
+        fileName,
+        error: `Arquivo incompatível: sistema de origem "${meta.system || 'desconhecido'}". Apenas backups gerados pelo LocaPsico são aceitos.`
+      };
+    }
+
+    // Bloqueio estrito de Backup Anonimizado (por metadados, nome de arquivo ou inspeção dos registros)
+    const isMetaAnonymized =
+      String(meta.backupType || '').toUpperCase() === 'ANONIMIZADO' ||
+      meta.isAnonymized === true ||
+      meta.restorable === false ||
+      String(meta.description || '').toUpperCase().includes('ANONIMIZADO') ||
+      String(meta.generatedBy?.email || '').endsWith('@anonimizado.local');
+
+    const isFileNameAnonymized = Boolean(
+      fileName && fileName.toLowerCase().includes('anonimizado')
+    );
+
+    const data = parsed.data;
+    if (!data || typeof data !== 'object') {
+      return {
+        valid: false,
+        fileName,
+        error: 'Arquivo inválido: bloco de dados ("data") não encontrado.'
+      };
+    }
+
+    let hasMaskedRecords = false;
+    const sampleRows = [
+      ...(Array.isArray(data.profiles) ? data.profiles : []),
+      ...(Array.isArray(data.professionals) ? data.professionals : []),
+      ...(Array.isArray(data.clients) ? data.clients : [])
+    ];
+
+    for (const row of sampleRows) {
+      if (!row || typeof row !== 'object') continue;
+      const email = String(row.email || '').toLowerCase();
+      const cpf = String(row.cpf || '');
+      const phone = String(row.phone || '');
+      const name = String(row.full_name || row.name || '');
+
+      if (
+        email.endsWith('@anonimizado.local') ||
+        cpf === '***.***.***-**' ||
+        phone === '(**) *****-****' ||
+        name.includes('Anonimizado #') ||
+        String(row.crp || '') === 'CRP-ANONIMIZADO'
+      ) {
+        hasMaskedRecords = true;
+        break;
+      }
+    }
+
+    if (isMetaAnonymized || isFileNameAnonymized || hasMaskedRecords) {
+      return {
+        valid: false,
+        isAnonymizedDetected: true,
+        fileName,
+        error:
+          'RESTAURAÇÃO BLOQUEADA: Este arquivo é um BACKUP ANONIMIZADO (LGPD) com dados mascarados. ' +
+          'Restaurá-lo sobrescreveria nomes, CPFs, telefones e e-mails reais por máscaras. ' +
+          'Selecione exclusivamente um arquivo de BACKUP COMPLETO (locapsico_backup_completo_...).'
+      };
+    }
+
+    for (const table of REQUIRED_TABLES) {
+      if (!Array.isArray(data[table])) {
+        return {
+          valid: false,
+          fileName,
+          error: `Arquivo de backup incompleto: a tabela obrigatória "${table}" não foi encontrada no arquivo.`
+        };
+      }
+    }
+
+    const counts: BackupCounts = {
+      profiles: data.profiles.length,
+      professionals: data.professionals.length,
+      clients: data.clients.length,
+      rooms: data.rooms.length,
+      bookings: data.bookings.length,
+      payments: data.payments.length,
+      blocked_slots: data.blocked_slots.length,
+      settings: data.settings.length,
+      audit_logs: data.audit_logs.length
+    };
+
+    const totalRecords = Object.values(counts).reduce((acc, c) => acc + c, 0);
+
+    return {
+      valid: true,
+      fileName,
+      payload: parsed as SystemBackupPayload,
+      summary: {
+        system: String(meta.system),
+        schemaVersion: String(meta.schemaVersion || '1.0'),
+        backupType: 'COMPLETO',
+        generatedAt: String(meta.generatedAt || ''),
+        generatedByName: String(meta.generatedBy?.name || 'Administrador'),
+        generatedByEmail: String(meta.generatedBy?.email || 'admin@admin.com.br'),
+        totalRecords,
+        counts
+      }
+    };
+  },
+
+  /**
+   * Executa a restauração segura de um Backup Completo validado.
+   * Opcionalmente gera e baixa antes uma cópia de segurança pré-restauração do estado atual.
+   */
+  restoreSystemBackup: async (
+    adminUser: User,
+    backupPayload: SystemBackupPayload,
+    confirmationWord: string,
+    autoDownloadSafetyBackup = true
+  ): Promise<RestoreExecutionResult> => {
+    if (!adminUser || adminUser.role !== 'ADMIN') {
+      throw new Error('Permissão negada. Apenas administradores podem restaurar backups do sistema.');
+    }
+
+    if (String(confirmationWord || '').trim().toUpperCase() !== 'RESTAURAR') {
+      throw new Error('Digite exatamente a palavra RESTAURAR para confirmar a operação.');
+    }
+
+    // Revalidar que o payload é um Backup Completo legítimo
+    const check = backupService.validateBackupFileContent(JSON.stringify(backupPayload));
+    if (!check.valid) {
+      throw new Error(check.error || 'Arquivo de backup inválido para restauração.');
+    }
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData?.session?.access_token;
+
+    if (!token) {
+      throw new Error('Sessão administrativa expirada ou não encontrada. Faça login novamente.');
+    }
+
+    // 1. Gerar e baixar automaticamente um Backup Completo de Segurança Pré-Restauração antes de alterar os dados
+    let safetyBackupFileName: string | undefined;
+    if (autoDownloadSafetyBackup) {
+      try {
+        const currentSnapshot = await backupService.fetchSystemBackup(adminUser, 'full');
+        safetyBackupFileName = backupService.downloadPreRestoreSafetyBackup(currentSnapshot);
+      } catch (preErr) {
+        console.warn('Aviso ao gerar backup automático pré-restauração:', preErr);
+      }
+    }
+
+    // 2. Enviar para o endpoint seguro de restauração (/api/admin/restore)
+    try {
+      const response = await fetch('/api/admin/restore', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          backup: backupPayload,
+          confirmationWord: 'RESTAURAR'
+        })
+      });
+
+      let parsed: any = null;
+      try {
+        const text = await response.text();
+        parsed = JSON.parse(text);
+      } catch {
+        // Resposta não é JSON (ex: 404 em hospedagem puramente estática)
+      }
+
+      if (response.ok && parsed?.success) {
+        // Sincronizar o cache local com os dados restaurados para atualização imediata da UI
+        syncLocalStorageFromBackupData(backupPayload.data);
+        addAuditLog(
+          adminUser.id,
+          adminUser.name,
+          'Restauração de Backup Completo',
+          `Backup Completo restaurado com sucesso (${parsed.totalRestored || 0} registros processados).`
+        );
+
+        return {
+          success: true,
+          message: parsed.message || 'Backup Completo restaurado com sucesso!',
+          restoredAt: parsed.restoredAt || new Date().toISOString(),
+          totalRestored: parsed.totalRestored || check.summary?.totalRecords || 0,
+          counts: parsed.counts || check.summary!.counts,
+          safetyBackupFileName
+        };
+      }
+
+      if (response.status === 404 || !parsed) {
+        const fallbackRes = await executeClientSideAdminRestore(adminUser, backupPayload);
+        return {
+          ...fallbackRes,
+          safetyBackupFileName
+        };
+      }
+
+      throw new Error(parsed?.error || `Falha ao restaurar backup no servidor (status ${response.status}).`);
+    } catch (err: any) {
+      if (err?.message?.includes('Failed to fetch') || err?.message?.includes('NetworkError')) {
+        const fallbackRes = await executeClientSideAdminRestore(adminUser, backupPayload);
+        return {
+          ...fallbackRes,
+          safetyBackupFileName
+        };
+      }
+      throw err;
+    }
   }
 };

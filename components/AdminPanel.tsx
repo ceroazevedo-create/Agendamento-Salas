@@ -24,11 +24,17 @@ import {
   Search, CheckCircle2, XCircle, Trash2, Edit2, 
   Download, Plus, RefreshCw, Clock, ArrowRight, Lock,
   UserX, AlertTriangle, KeyRound, Copy, Eye, EyeOff, MessageCircle,
-  UserCheck, ShieldCheck, Check, Palmtree, CalendarOff, Database
+  UserCheck, ShieldCheck, Check, Palmtree, CalendarOff, Database, Upload, RotateCcw
 } from 'lucide-react';
 import { useToast } from './Toast';
 import { checkPasswordStrength, getPasswordValidationMessage } from '../utils/passwordSecurity';
-import { backupService, BackupCounts, BackupMode } from '../services/backupService';
+import {
+  backupService,
+  BackupCounts,
+  BackupMode,
+  BackupValidationResult,
+  RestoreExecutionResult
+} from '../services/backupService';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -155,6 +161,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
     totalRecords: number;
     counts: BackupCounts;
   } | null>(null);
+
+  // Restauração Segura de Backup Completo State
+  const [restoreValidation, setRestoreValidation] = useState<BackupValidationResult | null>(null);
+  const [restoreConfirmChecked, setRestoreConfirmChecked] = useState<boolean>(false);
+  const [restoreConfirmWord, setRestoreConfirmWord] = useState<string>('');
+  const [autoSafetyBackupBeforeRestore, setAutoSafetyBackupBeforeRestore] = useState<boolean>(true);
+  const [isRestoringBackup, setIsRestoringBackup] = useState<boolean>(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [lastRestoreResult, setLastRestoreResult] = useState<RestoreExecutionResult | null>(null);
 
   const { addToast } = useToast();
 
@@ -632,6 +647,99 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
       addToast(msg, 'error');
     } finally {
       setGeneratingBackupMode(null);
+    }
+  };
+
+  // Selecionar e validar arquivo JSON para Restauração Segura (somente Backup Completo)
+  const handleSelectRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setRestoreError(null);
+    setLastRestoreResult(null);
+    setRestoreConfirmChecked(false);
+    setRestoreConfirmWord('');
+
+    if (!file.name.toLowerCase().endsWith('.json')) {
+      const msg = 'Formato inválido. Selecione um arquivo com extensão .json gerado pelo LocaPsico.';
+      setRestoreValidation({
+        valid: false,
+        fileName: file.name,
+        error: msg
+      });
+      addToast(msg, 'error');
+      return;
+    }
+
+    try {
+      const rawText = await file.text();
+      const validation = backupService.validateBackupFileContent(rawText, file.name);
+      setRestoreValidation(validation);
+
+      if (!validation.valid) {
+        addToast(validation.error || 'Arquivo de backup rejeitado na validação.', 'error');
+      } else {
+        addToast('Arquivo de Backup Completo validado! Revise o resumo antes de restaurar.', 'success');
+      }
+    } catch (err: any) {
+      const msg = err?.message || 'Erro ao ler o arquivo selecionado.';
+      setRestoreValidation({
+        valid: false,
+        fileName: file.name,
+        error: msg
+      });
+      addToast(msg, 'error');
+    }
+  };
+
+  const handleClearRestoreSelection = () => {
+    setRestoreValidation(null);
+    setRestoreConfirmChecked(false);
+    setRestoreConfirmWord('');
+    setRestoreError(null);
+  };
+
+  const handleExecuteSafeRestore = async () => {
+    if (!restoreValidation?.valid || !restoreValidation.payload) {
+      addToast('Selecione um arquivo de Backup Completo válido antes de continuar.', 'error');
+      return;
+    }
+
+    if (!restoreConfirmChecked) {
+      addToast('Marque a caixa de confirmação de segurança para prosseguir.', 'error');
+      return;
+    }
+
+    if (restoreConfirmWord.trim().toUpperCase() !== 'RESTAURAR') {
+      addToast('Digite exatamente a palavra RESTAURAR no campo de confirmação.', 'error');
+      return;
+    }
+
+    setIsRestoringBackup(true);
+    setRestoreError(null);
+
+    try {
+      const result = await backupService.restoreSystemBackup(
+        adminActor,
+        restoreValidation.payload,
+        restoreConfirmWord,
+        autoSafetyBackupBeforeRestore
+      );
+
+      setLastRestoreResult(result);
+      setRestoreValidation(null);
+      setRestoreConfirmChecked(false);
+      setRestoreConfirmWord('');
+
+      addToast('Restauração do Backup Completo concluída com sucesso!', 'success');
+      await loadAdminData();
+    } catch (err: any) {
+      const msg = err?.message || 'Falha ao executar a restauração do backup.';
+      setRestoreError(msg);
+      addToast(msg, 'error');
+    } finally {
+      setIsRestoringBackup(false);
     }
   };
 
@@ -2205,6 +2313,374 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                 </ul>
               </div>
             </div>
+          </div>
+
+          {/* ================= SEÇÃO DE RESTAURAÇÃO SEGURA DE BACKUP COMPLETO ================= */}
+          <div className="bg-white rounded-3xl p-6 lg:p-8 border-2 border-amber-200/80 shadow-sm space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-6">
+              <div className="flex items-start gap-4">
+                <div className="w-14 h-14 rounded-2xl bg-amber-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-amber-600/20">
+                  <RotateCcw size={26} />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-xl font-black text-gray-900">
+                      Restauração Segura de Backup
+                    </h3>
+                    <span className="bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase tracking-wider flex items-center gap-1">
+                      <Lock size={11} /> Somente Backup Completo
+                    </span>
+                    <span className="bg-teal-50 text-teal-700 border border-teal-200 text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase tracking-wider flex items-center gap-1">
+                      <ShieldCheck size={11} /> Conta Admin Protegida
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-600 mt-1 leading-relaxed max-w-3xl">
+                    Permite restaurar integralmente o banco de dados a partir de um arquivo de{' '}
+                    <strong>Backup Completo</strong> gerado pelo próprio LocaPsico (
+                    <code className="text-[11px] bg-gray-100 px-1.5 py-0.5 rounded">
+                      locapsico_backup_completo_...json
+                    </code>
+                    ). Por segurança, arquivos de <strong>Backup Anonimizado são estritamente bloqueados</strong> e jamais podem ser restaurados.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Seleção de Arquivo JSON */}
+            <div className="p-6 rounded-3xl bg-amber-50/40 border border-amber-200/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <h4 className="text-sm font-black text-gray-900 flex items-center gap-2">
+                  <Upload size={16} className="text-amber-700" />
+                  1. Selecionar Arquivo de Backup Completo (.json)
+                </h4>
+                <p className="text-xs text-gray-600">
+                  O sistema fará a leitura e validação estrutural completa do arquivo antes de habilitar qualquer alteração no banco de dados.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2.5 shrink-0 w-full sm:w-auto">
+                <label className="cursor-pointer w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-gray-900 hover:bg-gray-800 text-white text-xs font-black uppercase tracking-wider transition-all shadow-sm">
+                  <Upload size={15} />
+                  <span>Escolher Arquivo .JSON</span>
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    onChange={handleSelectRestoreFile}
+                    disabled={isRestoringBackup}
+                    className="hidden"
+                  />
+                </label>
+
+                {restoreValidation && (
+                  <button
+                    type="button"
+                    onClick={handleClearRestoreSelection}
+                    disabled={isRestoringBackup}
+                    className="px-3.5 py-3 rounded-2xl bg-white hover:bg-gray-100 text-gray-600 border border-gray-200 text-xs font-bold transition-all"
+                  >
+                    Limpar
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Caso o arquivo selecionado seja INVÁLIDO ou ANONIMIZADO */}
+            {restoreValidation && !restoreValidation.valid && (
+              <div className="p-6 rounded-3xl bg-red-50 border-2 border-red-200 space-y-3 animate-fade-in">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-red-600 text-white flex items-center justify-center shrink-0">
+                    <XCircle size={20} />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-black uppercase tracking-wider text-red-900">
+                        {restoreValidation.isAnonymizedDetected
+                          ? 'Restauração Bloqueada: Backup Anonimizado Detectado'
+                          : 'Arquivo Rejeitado na Validação de Segurança'}
+                      </span>
+                      {restoreValidation.fileName && (
+                        <span className="text-[10px] font-mono bg-white px-2 py-0.5 rounded border border-red-200 text-red-800">
+                          {restoreValidation.fileName}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-red-800 font-medium leading-relaxed">
+                      {restoreValidation.error}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Caso o arquivo selecionado seja um BACKUP COMPLETO VÁLIDO: Pré-visualização e Confirmação */}
+            {restoreValidation && restoreValidation.valid && restoreValidation.summary && (
+              <div className="p-6 rounded-3xl bg-amber-50/60 border-2 border-amber-300 space-y-6 animate-fade-in">
+                {/* Cabeçalho da Inspeção */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-amber-200 pb-4">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-teal-600 text-white flex items-center justify-center shrink-0 mt-0.5">
+                      <CheckCircle2 size={20} />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-black uppercase tracking-wider text-gray-900">
+                          2. Inspeção Prévia do Arquivo Validado
+                        </span>
+                        <span className="bg-teal-600 text-white text-[10px] font-black px-2.5 py-0.5 rounded-md uppercase">
+                          Backup {restoreValidation.summary.backupType} • Apto para Restauração
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-gray-600 mt-0.5">
+                        Arquivo: <strong className="font-mono text-gray-900">{restoreValidation.fileName}</strong> •{' '}
+                        Gerado por: <strong>{restoreValidation.summary.generatedByName}</strong> ({restoreValidation.summary.generatedByEmail})
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="text-right">
+                    <span className="text-[10px] font-black uppercase text-amber-900 block">
+                      Data do Backup
+                    </span>
+                    <span className="text-xs font-black text-gray-900 bg-white px-3 py-1 rounded-xl border border-amber-200 inline-block mt-0.5">
+                      {restoreValidation.summary.generatedAt
+                        ? format(parseISO(restoreValidation.summary.generatedAt), "dd/MM/yyyy 'às' HH:mm:ss")
+                        : 'Data registrada no arquivo'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Contagem Detalhada dos Registros que Serão Restaurados */}
+                <div>
+                  <span className="text-[10px] font-black uppercase tracking-wider text-gray-500 block mb-2.5">
+                    Quantidade de Registros no Arquivo por Tabela:
+                  </span>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 text-xs">
+                    <div className="p-3 bg-white rounded-2xl border border-amber-200/80">
+                      <span className="text-[10px] font-black uppercase text-gray-400 block">Perfis (profiles)</span>
+                      <span className="text-base font-black text-gray-900">{restoreValidation.summary.counts.profiles}</span>
+                    </div>
+                    <div className="p-3 bg-white rounded-2xl border border-amber-200/80">
+                      <span className="text-[10px] font-black uppercase text-gray-400 block">Profissionais</span>
+                      <span className="text-base font-black text-gray-900">{restoreValidation.summary.counts.professionals}</span>
+                    </div>
+                    <div className="p-3 bg-white rounded-2xl border border-amber-200/80">
+                      <span className="text-[10px] font-black uppercase text-gray-400 block">Pacientes (clients)</span>
+                      <span className="text-base font-black text-gray-900">{restoreValidation.summary.counts.clients}</span>
+                    </div>
+                    <div className="p-3 bg-white rounded-2xl border border-amber-200/80">
+                      <span className="text-[10px] font-black uppercase text-gray-400 block">Salas (rooms)</span>
+                      <span className="text-base font-black text-gray-900">{restoreValidation.summary.counts.rooms}</span>
+                    </div>
+                    <div className="p-3 bg-white rounded-2xl border border-amber-200/80">
+                      <span className="text-[10px] font-black uppercase text-gray-400 block">Agendamentos</span>
+                      <span className="text-base font-black text-gray-900">{restoreValidation.summary.counts.bookings}</span>
+                    </div>
+                    <div className="p-3 bg-white rounded-2xl border border-amber-200/80">
+                      <span className="text-[10px] font-black uppercase text-gray-400 block">Pagamentos</span>
+                      <span className="text-base font-black text-gray-900">{restoreValidation.summary.counts.payments}</span>
+                    </div>
+                    <div className="p-3 bg-white rounded-2xl border border-amber-200/80">
+                      <span className="text-[10px] font-black uppercase text-gray-400 block">Bloqueios</span>
+                      <span className="text-base font-black text-gray-900">{restoreValidation.summary.counts.blocked_slots}</span>
+                    </div>
+                    <div className="p-3 bg-white rounded-2xl border border-amber-200/80">
+                      <span className="text-[10px] font-black uppercase text-gray-400 block">Configurações</span>
+                      <span className="text-base font-black text-gray-900">{restoreValidation.summary.counts.settings}</span>
+                    </div>
+                    <div className="p-3 bg-white rounded-2xl border border-amber-200/80">
+                      <span className="text-[10px] font-black uppercase text-gray-400 block">Logs Auditoria</span>
+                      <span className="text-base font-black text-gray-900">{restoreValidation.summary.counts.audit_logs}</span>
+                    </div>
+                    <div className="p-3 bg-amber-600 text-white rounded-2xl">
+                      <span className="text-[10px] font-black uppercase text-amber-100 block">Total no Arquivo</span>
+                      <span className="text-base font-black">{restoreValidation.summary.totalRecords} reg.</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Garantias Técnicas da Restauração */}
+                <div className="p-4 rounded-2xl bg-white border border-amber-200/90 space-y-2 text-xs">
+                  <span className="font-black text-amber-900 uppercase tracking-wider block text-[10px]">
+                    Protocolo de Segurança e Integridade Relacional:
+                  </span>
+                  <ul className="space-y-1 text-gray-600 text-[11px]">
+                    <li>
+                      • <strong>Preservação Absoluta do Administrador:</strong> Sua conta atual (
+                      <code>{adminActor.email}</code>) permanecerá ativa, autenticada e com permissão{' '}
+                      <code>admin</code> em <code>auth.users</code> e <code>profiles</code>.
+                    </li>
+                    <li>
+                      • <strong>Ordem Estrita de Chaves Estrangeiras:</strong> Os dados serão restaurados na sequência{' '}
+                      <code>settings → rooms → profiles → professionals → clients → bookings → blocked_slots → payments → audit_logs</code>.
+                    </li>
+                    <li>
+                      • <strong>Rollback Automático em Memória:</strong> Se qualquer falha de integridade ocorrer no servidor, o estado imediatamente anterior é preservado automaticamente.
+                    </li>
+                  </ul>
+                </div>
+
+                {/* Etapas de Confirmação Obrigatória */}
+                <div className="p-5 rounded-2xl bg-white border-2 border-amber-300 space-y-4">
+                  <h5 className="text-xs font-black uppercase tracking-wider text-gray-900 flex items-center gap-2">
+                    <AlertTriangle size={16} className="text-amber-600" />
+                    3. Confirmação Dupla de Segurança para Restaurar
+                  </h5>
+
+                  {/* Checkbox 1: Backup Automático Pré-Restauração */}
+                  <label className="flex items-start gap-3 cursor-pointer select-none p-3 rounded-xl bg-teal-50/70 border border-teal-200">
+                    <input
+                      type="checkbox"
+                      checked={autoSafetyBackupBeforeRestore}
+                      onChange={e => setAutoSafetyBackupBeforeRestore(e.target.checked)}
+                      disabled={isRestoringBackup}
+                      className="mt-0.5 w-4 h-4 rounded text-teal-600 focus:ring-teal-500"
+                    />
+                    <div className="text-xs">
+                      <span className="font-bold text-teal-950 block">
+                        Gerar e baixar automaticamente um Backup Completo de Segurança do estado atual antes de restaurar (Recomendado)
+                      </span>
+                      <span className="text-[11px] text-teal-800">
+                        Salva automaticamente o arquivo <code className="font-mono">locapsico_backup_pre_restauracao_...json</code> no seu computador antes de aplicar a restauração.
+                      </span>
+                    </div>
+                  </label>
+
+                  {/* Checkbox 2: Ciência Obrigatória */}
+                  <label className="flex items-start gap-3 cursor-pointer select-none p-3 rounded-xl bg-amber-50/70 border border-amber-200">
+                    <input
+                      type="checkbox"
+                      checked={restoreConfirmChecked}
+                      onChange={e => setRestoreConfirmChecked(e.target.checked)}
+                      disabled={isRestoringBackup}
+                      className="mt-0.5 w-4 h-4 rounded text-amber-600 focus:ring-amber-500"
+                    />
+                    <span className="text-xs font-semibold text-gray-800 leading-relaxed">
+                      Confirmo que verifiquei os metadados e quantidades de registros acima e desejo restaurar o banco de dados do LocaPsico para o estado deste <strong>Backup Completo</strong>.
+                    </span>
+                  </label>
+
+                  {/* Palavra de Confirmação + Botão de Execução */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end pt-1">
+                    <div>
+                      <label className="block text-[11px] font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                        Digite <span className="text-amber-700 font-mono">RESTAURAR</span> para habilitar a execução:
+                      </label>
+                      <input
+                        type="text"
+                        value={restoreConfirmWord}
+                        onChange={e => setRestoreConfirmWord(e.target.value)}
+                        disabled={isRestoringBackup}
+                        placeholder="Digite RESTAURAR"
+                        className="w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-2xl text-xs font-black uppercase tracking-widest text-gray-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={
+                        isRestoringBackup ||
+                        !restoreConfirmChecked ||
+                        restoreConfirmWord.trim().toUpperCase() !== 'RESTAURAR'
+                      }
+                      onClick={handleExecuteSafeRestore}
+                      className="w-full py-3.5 px-6 rounded-2xl bg-amber-600 hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2.5 shadow-md shadow-amber-600/20"
+                    >
+                      {isRestoringBackup ? (
+                        <>
+                          <RefreshCw size={16} className="animate-spin" />
+                          <span>Restaurando Backup Completo...</span>
+                        </>
+                      ) : (
+                        <>
+                          <RotateCcw size={16} />
+                          <span>Confirmar e Restaurar Sistema</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Erro durante a execução da restauração */}
+            {restoreError && (
+              <div className="p-4 rounded-2xl bg-red-50 border border-red-200 flex items-start gap-3 text-red-900 animate-fade-in">
+                <AlertTriangle size={18} className="text-red-600 shrink-0 mt-0.5" />
+                <div className="text-xs space-y-1">
+                  <span className="font-black block text-red-800 uppercase tracking-wider">
+                    Não foi possível concluir a restauração
+                  </span>
+                  <p className="text-red-700 font-medium">{restoreError}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Resultado da Última Restauração Concluída */}
+            {lastRestoreResult && (
+              <div className="p-6 rounded-3xl bg-emerald-50/80 border-2 border-emerald-300 space-y-4 animate-fade-in">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-200 pb-3">
+                  <div className="flex items-center gap-2.5 text-emerald-950">
+                    <CheckCircle2 size={22} className="text-emerald-600 shrink-0" />
+                    <div>
+                      <span className="text-xs font-black uppercase tracking-wider block">
+                        Restauração de Backup Completo Concluída com Sucesso!
+                      </span>
+                      <span className="text-[11px] text-emerald-800 font-semibold block mt-0.5">
+                        {lastRestoreResult.safetyBackupFileName
+                          ? `Cópia preventiva salva antes da operação: ${lastRestoreResult.safetyBackupFileName}`
+                          : 'Todos os relacionamentos e dados foram sincronizados e recarregados.'}
+                      </span>
+                    </div>
+                  </div>
+                  <span className="text-[11px] font-bold text-emerald-800 bg-white px-3 py-1 rounded-xl border border-emerald-200 self-start sm:self-auto">
+                    {format(parseISO(lastRestoreResult.restoredAt), "dd/MM/yyyy 'às' HH:mm:ss")}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 text-xs">
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Perfis Restaurados</span>
+                    <span className="text-base font-black text-gray-900">{lastRestoreResult.counts.profiles}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Profissionais</span>
+                    <span className="text-base font-black text-gray-900">{lastRestoreResult.counts.professionals}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Pacientes</span>
+                    <span className="text-base font-black text-gray-900">{lastRestoreResult.counts.clients}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Salas</span>
+                    <span className="text-base font-black text-gray-900">{lastRestoreResult.counts.rooms}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Agendamentos</span>
+                    <span className="text-base font-black text-gray-900">{lastRestoreResult.counts.bookings}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Pagamentos</span>
+                    <span className="text-base font-black text-gray-900">{lastRestoreResult.counts.payments}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Bloqueios</span>
+                    <span className="text-base font-black text-gray-900">{lastRestoreResult.counts.blocked_slots}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Configurações</span>
+                    <span className="text-base font-black text-gray-900">{lastRestoreResult.counts.settings}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Logs Auditoria</span>
+                    <span className="text-base font-black text-gray-900">{lastRestoreResult.counts.audit_logs}</span>
+                  </div>
+                  <div className="p-3 bg-emerald-600 text-white rounded-2xl">
+                    <span className="text-[10px] font-black uppercase text-emerald-100 block">Total Restaurado</span>
+                    <span className="text-base font-black">{lastRestoreResult.totalRestored} reg.</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
