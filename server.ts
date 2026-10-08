@@ -135,6 +135,136 @@ app.post('/api/admin/reset-password', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * GET / POST /api/admin/backup
+ * Exporta cópia completa em formato JSON de todas as tabelas públicas do sistema (somente leitura).
+ */
+const handleAdminBackup = async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Não autorizado. Token de autenticação Bearer ausente.' });
+    }
+
+    const token = authHeader.slice('Bearer '.length).trim();
+    if (!token) {
+      return res.status(401).json({ error: 'Não autorizado. Token de autenticação vazio ou malformado.' });
+    }
+
+    const supabaseAdmin = getSupabaseAdmin();
+
+    const { data: callerData, error: callerError } = await supabaseAdmin.auth.getUser(token);
+    if (callerError || !callerData?.user) {
+      return res.status(401).json({ error: 'Sessão administrativa inválida ou expirada.' });
+    }
+
+    const { data: callerProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('role, full_name, email')
+      .eq('id', callerData.user.id)
+      .maybeSingle();
+
+    const roleNormalized = String(callerProfile?.role || '').toLowerCase();
+    const isAdmin =
+      roleNormalized === 'admin' ||
+      callerData.user.email?.toLowerCase() === 'admin@admin.com.br';
+
+    if (!isAdmin) {
+      return res.status(403).json({ error: 'Permissão negada. Apenas administradores podem gerar backup do sistema.' });
+    }
+
+    const [
+      profilesRes,
+      professionalsRes,
+      clientsRes,
+      roomsRes,
+      bookingsRes,
+      paymentsRes,
+      blockedSlotsRes,
+      settingsRes,
+      auditLogsRes
+    ] = await Promise.all([
+      supabaseAdmin.from('profiles').select('*').order('created_at', { ascending: true }),
+      supabaseAdmin.from('professionals').select('*').order('created_at', { ascending: true }),
+      supabaseAdmin.from('clients').select('*').order('created_at', { ascending: true }),
+      supabaseAdmin.from('rooms').select('*').order('id', { ascending: true }),
+      supabaseAdmin.from('bookings').select('*').order('booking_date', { ascending: false }),
+      supabaseAdmin.from('payments').select('*').order('created_at', { ascending: false }),
+      supabaseAdmin.from('blocked_slots').select('*').order('blocked_date', { ascending: false }),
+      supabaseAdmin.from('settings').select('*'),
+      supabaseAdmin.from('audit_logs').select('*').order('timestamp', { ascending: false })
+    ]);
+
+    const tableErrors = [
+      { table: 'profiles', error: profilesRes.error },
+      { table: 'professionals', error: professionalsRes.error },
+      { table: 'clients', error: clientsRes.error },
+      { table: 'rooms', error: roomsRes.error },
+      { table: 'bookings', error: bookingsRes.error },
+      { table: 'payments', error: paymentsRes.error },
+      { table: 'blocked_slots', error: blockedSlotsRes.error },
+      { table: 'settings', error: settingsRes.error },
+      { table: 'audit_logs', error: auditLogsRes.error }
+    ].filter(item => item.error !== null);
+
+    if (tableErrors.length > 0) {
+      const firstErr = tableErrors[0];
+      return res.status(500).json({
+        error: `Falha ao ler a tabela '${firstErr.table}': ${firstErr.error?.message || 'Erro desconhecido'}`
+      });
+    }
+
+    const data = {
+      profiles: profilesRes.data || [],
+      professionals: professionalsRes.data || [],
+      clients: clientsRes.data || [],
+      rooms: roomsRes.data || [],
+      bookings: bookingsRes.data || [],
+      payments: paymentsRes.data || [],
+      blocked_slots: blockedSlotsRes.data || [],
+      settings: settingsRes.data || [],
+      audit_logs: auditLogsRes.data || []
+    };
+
+    const counts = {
+      profiles: data.profiles.length,
+      professionals: data.professionals.length,
+      clients: data.clients.length,
+      rooms: data.rooms.length,
+      bookings: data.bookings.length,
+      payments: data.payments.length,
+      blocked_slots: data.blocked_slots.length,
+      settings: data.settings.length,
+      audit_logs: data.audit_logs.length
+    };
+
+    const totalRecords = Object.values(counts).reduce((acc, c) => acc + c, 0);
+
+    return res.json({
+      metadata: {
+        system: 'LocaPsico',
+        description: 'Backup completo de segurança dos dados do sistema LocaPsico',
+        schemaVersion: '1.0',
+        generatedAt: new Date().toISOString(),
+        generatedBy: {
+          id: callerData.user.id,
+          email: callerData.user.email || callerProfile?.email || 'admin@admin.com.br',
+          name: callerProfile?.full_name || 'Administrador'
+        },
+        totalRecords,
+        counts
+      },
+      data
+    });
+  } catch (err: any) {
+    console.error('Erro inesperado na rota /api/admin/backup:', err);
+    return res.status(500).json({ error: err.message || 'Erro interno ao gerar o backup no servidor.' });
+  }
+};
+
+app.get('/api/admin/backup', handleAdminBackup);
+app.post('/api/admin/backup', handleAdminBackup);
+
 // Start Server & Vite Middleware Setup
 async function start() {
   if (process.env.NODE_ENV !== 'production') {

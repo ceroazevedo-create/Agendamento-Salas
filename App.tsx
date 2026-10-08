@@ -21,7 +21,8 @@ export type AppView =
   | 'bookings' 
   | 'billing' 
   | 'profile' 
-  | 'admin';
+  | 'admin'
+  | 'backup';
 
 const AppContent: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -173,6 +174,7 @@ const AppContent: React.FC = () => {
     { id: 'admin' as AppView, label: 'Painel Geral', icon: LayoutDashboard },
     { id: 'calendar' as AppView, label: 'Agenda Completa', icon: CalendarIcon },
     { id: 'clients' as AppView, label: 'Pacientes', icon: Users },
+    { id: 'backup' as AppView, label: 'Backup e Segurança', icon: Shield },
     { id: 'profile' as AppView, label: 'Meu Perfil', icon: UserCheck },
   ];
 
@@ -379,6 +381,14 @@ const AppContent: React.FC = () => {
           <AdminPanel 
             currentUser={currentUser} 
             onUpdateUser={setCurrentUser} 
+          />
+        )}
+
+        {currentView === 'backup' && isAdmin && (
+          <AdminPanel 
+            currentUser={currentUser} 
+            onUpdateUser={setCurrentUser} 
+            initialTab="backup" 
           />
         )}
       </main>

@@ -24,10 +24,11 @@ import {
   Search, CheckCircle2, XCircle, Trash2, Edit2, 
   Download, Plus, RefreshCw, Clock, ArrowRight, Lock,
   UserX, AlertTriangle, KeyRound, Copy, Eye, EyeOff, MessageCircle,
-  UserCheck, ShieldCheck, Check, Palmtree, CalendarOff
+  UserCheck, ShieldCheck, Check, Palmtree, CalendarOff, Database
 } from 'lucide-react';
 import { useToast } from './Toast';
 import { checkPasswordStrength, getPasswordValidationMessage } from '../utils/passwordSecurity';
+import { backupService, BackupCounts } from '../services/backupService';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -41,6 +42,7 @@ type AdminTab =
   | 'blocks' 
   | 'settings' 
   | 'audit'
+  | 'backup'
   | 'profile';
 
 interface AdminPanelProps {
@@ -140,6 +142,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
     userEmail: string; 
     userPhone?: string; 
     newPass: string 
+  } | null>(null);
+
+  // Backup e Segurança State
+  const [isGeneratingBackup, setIsGeneratingBackup] = useState<boolean>(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [lastBackupResult, setLastBackupResult] = useState<{
+    fileName: string;
+    generatedAt: string;
+    totalRecords: number;
+    counts: BackupCounts;
   } | null>(null);
 
   const { addToast } = useToast();
@@ -591,6 +603,33 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
     addToast('Credenciais copiadas para a área de transferência!', 'success');
   };
 
+  // Gerar e Baixar Backup Completo do Sistema (Somente Leitura)
+  const handleRunBackupNow = async () => {
+    if (isGeneratingBackup) return;
+    setIsGeneratingBackup(true);
+    setBackupError(null);
+
+    try {
+      const backupPayload = await backupService.fetchSystemBackup(adminActor);
+      const fileName = backupService.downloadBackupFile(backupPayload);
+
+      setLastBackupResult({
+        fileName,
+        generatedAt: backupPayload.metadata.generatedAt,
+        totalRecords: backupPayload.metadata.totalRecords,
+        counts: backupPayload.metadata.counts
+      });
+
+      addToast(`Backup concluído com sucesso! Arquivo ${fileName} baixado.`, 'success');
+    } catch (err: any) {
+      const msg = err?.message || 'Não foi possível gerar o backup no momento.';
+      setBackupError(msg);
+      addToast(msg, 'error');
+    } finally {
+      setIsGeneratingBackup(false);
+    }
+  };
+
   // Exportar Relatório em PDF
   const handleExportPDF = () => {
     const doc = new jsPDF();
@@ -647,6 +686,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
           { id: 'blocks', label: 'Bloqueios', icon: Ban },
           { id: 'settings', label: 'Configurações', icon: Settings },
           { id: 'audit', label: 'Auditoria', icon: ShieldAlert },
+          { id: 'backup', label: 'Backup e Segurança', icon: ShieldCheck },
           { id: 'profile', label: 'Meu Perfil', icon: UserCheck }
         ].map(tab => {
           const Icon = tab.icon;
@@ -1888,6 +1928,182 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                 </span>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* ================= 9.5. BACKUP E SEGURANÇA ================= */}
+      {activeTab === 'backup' && (
+        <div className="max-w-4xl mx-auto space-y-6 animate-fade-in">
+          {/* Cabeçalho Principal */}
+          <div className="bg-white rounded-3xl p-6 lg:p-8 border border-gray-100 shadow-sm space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-6">
+              <div className="flex items-start gap-4">
+                <div className="w-14 h-14 rounded-2xl bg-teal-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-teal-600/20">
+                  <Database size={26} />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-xl font-black text-gray-900">Backup e Segurança</h3>
+                    <span className="bg-teal-50 text-teal-700 border border-teal-200 text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase tracking-wider flex items-center gap-1">
+                      <ShieldCheck size={12} /> Exclusivo Administrador
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1 leading-relaxed max-w-2xl">
+                    Gere e faça o download imediato de uma cópia completa de segurança de todos os dados importantes armazenados no banco de dados do LocaPsico.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Card Principal de Ação: Fazer backup agora */}
+            <div className="p-6 rounded-3xl bg-teal-50/50 border border-teal-200/80 flex flex-col md:flex-row md:items-center justify-between gap-6">
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-teal-600"></span>
+                  <h4 className="text-base font-black text-gray-900">
+                    Exportação Completa de Dados (.JSON)
+                  </h4>
+                </div>
+                <p className="text-xs text-gray-600 leading-relaxed max-w-xl">
+                  O arquivo gerado inclui todos os cadastros de usuários/perfis, profissionais, pacientes, salas e tarifas, agendamentos/locações, histórico de pagamentos, bloqueios de agenda, configurações e logs de auditoria.
+                </p>
+                <div className="flex flex-wrap items-center gap-3 pt-1 text-[11px] font-bold text-teal-800">
+                  <span className="inline-flex items-center gap-1 bg-white px-2.5 py-1 rounded-lg border border-teal-100">
+                    <CheckCircle2 size={12} className="text-teal-600" /> Operação 100% Somente Leitura
+                  </span>
+                  <span className="inline-flex items-center gap-1 bg-white px-2.5 py-1 rounded-lg border border-teal-100">
+                    <Lock size={12} className="text-teal-600" /> Sem Exposição de Senhas ou Chaves Secretas
+                  </span>
+                </div>
+              </div>
+
+              <div className="shrink-0">
+                <Button
+                  variant="primary"
+                  disabled={isGeneratingBackup}
+                  onClick={handleRunBackupNow}
+                  className="w-full md:w-auto px-7 py-3.5 text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2.5 shadow-md shadow-teal-600/20"
+                >
+                  {isGeneratingBackup ? (
+                    <>
+                      <RefreshCw size={16} className="animate-spin" />
+                      <span>Gerando backup...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download size={16} />
+                      <span>Fazer backup agora</span>
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            {/* Alerta de Erro caso ocorra falha */}
+            {backupError && (
+              <div className="p-4 rounded-2xl bg-red-50 border border-red-200 flex items-start gap-3 text-red-900 animate-fade-in">
+                <AlertTriangle size={18} className="text-red-600 shrink-0 mt-0.5" />
+                <div className="text-xs space-y-1">
+                  <span className="font-black block text-red-800 uppercase tracking-wider">
+                    Não foi possível concluir o backup
+                  </span>
+                  <p className="text-red-700 font-medium">{backupError}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Resultado do Último Backup Gerado na Sessão */}
+            {lastBackupResult && (
+              <div className="p-6 rounded-3xl bg-emerald-50/70 border border-emerald-200 space-y-4 animate-fade-in">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-emerald-200/60 pb-3">
+                  <div className="flex items-center gap-2.5 text-emerald-900">
+                    <CheckCircle2 size={20} className="text-emerald-600 shrink-0" />
+                    <div>
+                      <span className="text-xs font-black uppercase tracking-wider block">
+                        Backup Gerado e Baixado com Sucesso!
+                      </span>
+                      <span className="text-[11px] text-emerald-700 font-semibold">
+                        Arquivo: <strong className="font-mono">{lastBackupResult.fileName}</strong>
+                      </span>
+                    </div>
+                  </div>
+                  <span className="text-[11px] font-bold text-emerald-800 bg-white px-3 py-1 rounded-xl border border-emerald-200 self-start sm:self-auto">
+                    {format(parseISO(lastBackupResult.generatedAt), "dd/MM/yyyy 'às' HH:mm:ss")}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 text-xs">
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Perfis (profiles)</span>
+                    <span className="text-base font-black text-gray-900">{lastBackupResult.counts.profiles}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Profissionais</span>
+                    <span className="text-base font-black text-gray-900">{lastBackupResult.counts.professionals}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Pacientes (clients)</span>
+                    <span className="text-base font-black text-gray-900">{lastBackupResult.counts.clients}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Salas (rooms)</span>
+                    <span className="text-base font-black text-gray-900">{lastBackupResult.counts.rooms}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Agendamentos</span>
+                    <span className="text-base font-black text-gray-900">{lastBackupResult.counts.bookings}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Pagamentos</span>
+                    <span className="text-base font-black text-gray-900">{lastBackupResult.counts.payments}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Bloqueios</span>
+                    <span className="text-base font-black text-gray-900">{lastBackupResult.counts.blocked_slots}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Configurações</span>
+                    <span className="text-base font-black text-gray-900">{lastBackupResult.counts.settings}</span>
+                  </div>
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100">
+                    <span className="text-[10px] font-black uppercase text-gray-400 block">Logs Auditoria</span>
+                    <span className="text-base font-black text-gray-900">{lastBackupResult.counts.audit_logs}</span>
+                  </div>
+                  <div className="p-3 bg-emerald-600 text-white rounded-2xl">
+                    <span className="text-[10px] font-black uppercase text-emerald-100 block">Total Exportado</span>
+                    <span className="text-base font-black">{lastBackupResult.totalRecords} reg.</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Detalhamento Técnico e Garantias de Segurança */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+              <div className="p-5 rounded-2xl bg-gray-50 border border-gray-100 space-y-2.5 text-xs">
+                <h5 className="font-black text-gray-900 uppercase tracking-wider text-[11px] flex items-center gap-2">
+                  <Database size={14} className="text-teal-600" /> Tabelas Incluídas no Backup
+                </h5>
+                <ul className="space-y-1.5 text-gray-600">
+                  <li>• <strong>profiles</strong> e <strong>professionals</strong> (Usuários e dados profissionais)</li>
+                  <li>• <strong>clients</strong> (Cadastro de pacientes vinculados)</li>
+                  <li>• <strong>rooms</strong> e <strong>settings</strong> (Salas, tarifas e parâmetros globais)</li>
+                  <li>• <strong>bookings</strong> e <strong>payments</strong> (Reservas, valores e histórico financeiro)</li>
+                  <li>• <strong>blocked_slots</strong> e <strong>audit_logs</strong> (Bloqueios e trilha de auditoria)</li>
+                </ul>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-gray-50 border border-gray-100 space-y-2.5 text-xs">
+                <h5 className="font-black text-gray-900 uppercase tracking-wider text-[11px] flex items-center gap-2">
+                  <ShieldCheck size={14} className="text-teal-600" /> Proteção e Integridade
+                </h5>
+                <ul className="space-y-1.5 text-gray-600">
+                  <li>• <strong>Acesso Restrito:</strong> Validado por token de sessão e perfil de Administrador no servidor.</li>
+                  <li>• <strong>Operação Segura:</strong> Executa exclusivamente consultas de leitura (<code>SELECT</code>), sem alterar ou apagar nenhum dado.</li>
+                  <li>• <strong>Sigilo de Credenciais:</strong> Nenhuma senha ou chave privada do servidor é incluída no arquivo.</li>
+                </ul>
+              </div>
+            </div>
           </div>
         </div>
       )}
