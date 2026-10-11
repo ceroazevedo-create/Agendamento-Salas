@@ -709,20 +709,44 @@ export const bookingService = {
       throw new Error('Você só pode cancelar suas próprias reservas.');
     }
 
-    // 5. Validação de Antecedência Mínima de Cancelamento (Padrão 24h ou conforme configuração do sistema)
+    // 5. Validação de Antecedência Mínima de Cancelamento / Exclusão (conforme configurado pelo Administrador no banco)
     if (!isAdmin) {
-      const config = getSystemConfig();
-      const limitHours = config.cancellationLimitHours ?? 24;
+      let limitHours = getSystemConfig().cancellationLimitHours ?? 24;
 
-      const dateStr = String(remoteTarget?.booking_date || localTarget?.date || '').split('T')[0];
-      const startHour = Number(remoteTarget?.start_time !== undefined ? remoteTarget.start_time : localTarget?.hour ?? 7);
+      if (isSupabaseConfigured) {
+        try {
+          const { data: settingsRow } = await supabase
+            .from('settings')
+            .select('cancellation_limit_hours')
+            .eq('id', 'global')
+            .maybeSingle();
 
-      if (dateStr) {
-        const bookingStartTime = new Date(`${dateStr}T${startHour.toString().padStart(2, '0')}:00:00`);
-        const hoursDiff = differenceInHours(bookingStartTime, new Date());
+          if (settingsRow && settingsRow.cancellation_limit_hours !== undefined && settingsRow.cancellation_limit_hours !== null) {
+            limitHours = Math.max(0, Number(settingsRow.cancellation_limit_hours));
+            const localCfg = getSystemConfig();
+            if (localCfg.cancellationLimitHours !== limitHours) {
+              localCfg.cancellationLimitHours = limitHours;
+              saveSystemConfig(localCfg);
+            }
+          }
+        } catch {
+          // Mantém valor em cache local caso falhe a leitura remota
+        }
+      }
 
-        if (hoursDiff < limitHours) {
-          throw new Error(`Cancelamentos só podem ser realizados com no mínimo ${limitHours}h de antecedência do horário agendado.`);
+      if (limitHours > 0) {
+        const dateStr = String(remoteTarget?.booking_date || localTarget?.date || '').split('T')[0];
+        const startHour = Number(remoteTarget?.start_time !== undefined ? remoteTarget.start_time : localTarget?.hour ?? 7);
+
+        if (dateStr) {
+          const bookingStartTime = new Date(`${dateStr}T${startHour.toString().padStart(2, '0')}:00:00`);
+          const exactHoursDiff = (bookingStartTime.getTime() - Date.now()) / (1000 * 60 * 60);
+
+          if (exactHoursDiff < limitHours) {
+            throw new Error(
+              `Exclusões/cancelamentos só podem ser realizados com no mínimo ${limitHours} ${limitHours === 1 ? 'hora' : 'horas'} de antecedência do horário agendado.`
+            );
+          }
         }
       }
     }
@@ -1089,7 +1113,109 @@ export const bookingService = {
     );
   },
 
-  // Helpers de Configuração Global
+  // Helpers de Configuração Global e Prazo de Cancelamento
+  getGlobalSettings: async (): Promise<SystemConfig> => {
+    const localConfig = getSystemConfig();
+
+    if (isSupabaseConfigured) {
+      try {
+        const { data, error } = await supabase
+          .from('settings')
+          .select('*')
+          .eq('id', 'global')
+          .maybeSingle();
+
+        if (!error && data) {
+          const merged: SystemConfig = {
+            ...localConfig,
+            establishmentName: data.establishment_name || localConfig.establishmentName,
+            contactEmail: data.contact_email || localConfig.contactEmail,
+            contactPhone: data.contact_phone || localConfig.contactPhone,
+            openHour: Number(data.open_hour ?? localConfig.openHour ?? 7),
+            closeHour: Number(data.close_hour ?? localConfig.closeHour ?? 22),
+            cancellationLimitHours: Math.max(
+              0,
+              Number(data.cancellation_limit_hours ?? localConfig.cancellationLimitHours ?? 24)
+            ),
+            allowHolidaysGlobal:
+              typeof data.allow_holidays_global === 'boolean'
+                ? data.allow_holidays_global
+                : localConfig.allowHolidaysGlobal,
+            unblockedHolidays: Array.isArray(data.unblocked_holidays)
+              ? data.unblocked_holidays
+              : localConfig.unblockedHolidays
+          };
+          saveSystemConfig(merged);
+          return merged;
+        }
+      } catch (err) {
+        console.warn('Aviso ao carregar configurações globais do Supabase, usando local:', err);
+      }
+    }
+
+    return localConfig;
+  },
+
+  updateGlobalSettings: async (
+    newConfig: SystemConfig,
+    adminUser?: { id: string; name: string }
+  ): Promise<SystemConfig> => {
+    const normalizedLimit = Math.max(0, Math.floor(Number(newConfig.cancellationLimitHours ?? 24)));
+    const normalizedConfig: SystemConfig = {
+      ...newConfig,
+      cancellationLimitHours: normalizedLimit
+    };
+
+    if (isSupabaseConfigured) {
+      try {
+        const payload = {
+          id: 'global',
+          establishment_name: normalizedConfig.establishmentName,
+          contact_email: normalizedConfig.contactEmail,
+          contact_phone: normalizedConfig.contactPhone,
+          open_hour: Number(normalizedConfig.openHour || 7),
+          close_hour: Number(normalizedConfig.closeHour || 22),
+          cancellation_limit_hours: normalizedLimit,
+          allow_holidays_global: Boolean(normalizedConfig.allowHolidaysGlobal),
+          unblocked_holidays: normalizedConfig.unblockedHolidays || []
+        };
+
+        const { error } = await supabase
+          .from('settings')
+          .upsert(payload, { onConflict: 'id' });
+
+        if (error) {
+          throw new Error(translateSupabaseError(error));
+        }
+
+        if (adminUser) {
+          await safeInsertAuditLog({
+            user_id: adminUser.id,
+            user_name: adminUser.name,
+            action: 'Alteração de Configurações',
+            details: `Configurações atualizadas. Prazo mínimo para profissionais excluírem/cancelarem agendamentos definido para: ${normalizedLimit}h de antecedência.`
+          });
+        }
+      } catch (err: any) {
+        console.warn('Aviso ao persistir configurações no Supabase:', err);
+        throw err;
+      }
+    }
+
+    saveSystemConfig(normalizedConfig);
+
+    if (adminUser) {
+      addAuditLog(
+        adminUser.id,
+        adminUser.name,
+        'Alteração de Configurações',
+        `Prazo mínimo para profissionais excluírem/cancelarem agendamentos definido para ${normalizedLimit}h de antecedência.`
+      );
+    }
+
+    return normalizedConfig;
+  },
+
   getCurrentHourlyRate: async (roomId: RoomId = 'Sala 1'): Promise<number> => {
     if (isSupabaseConfigured) {
       try {

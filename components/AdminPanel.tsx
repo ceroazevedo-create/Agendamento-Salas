@@ -171,16 +171,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [lastRestoreResult, setLastRestoreResult] = useState<RestoreExecutionResult | null>(null);
 
+  const [isSavingSettings, setIsSavingSettings] = useState<boolean>(false);
+
   const { addToast } = useToast();
 
   const loadAdminData = async () => {
     setIsLoading(true);
     try {
-      const [bookingsRes, profilesRes, roomsRes, blocksRes] = await Promise.allSettled([
+      const [bookingsRes, profilesRes, roomsRes, blocksRes, settingsRes] = await Promise.allSettled([
         bookingService.getAllBookingsWithCancelled(),
         authService.getAllProfiles(),
         bookingService.getRooms(),
-        bookingService.getBlockedSlots()
+        bookingService.getBlockedSlots(),
+        bookingService.getGlobalSettings()
       ]);
 
       if (bookingsRes.status === 'fulfilled' && bookingsRes.value) {
@@ -215,7 +218,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
       }
 
       setAuditLogs(getStoredAuditLogs());
-      setConfig(getSystemConfig());
+      if (settingsRes.status === 'fulfilled' && settingsRes.value) {
+        setConfig(settingsRes.value);
+      } else {
+        setConfig(getSystemConfig());
+      }
     } catch (err: any) {
       console.error('Erro inesperado ao carregar painel administrativo:', err);
       // Garante que mesmo em erro fatal os dados locais sejam montados
@@ -226,6 +233,32 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
       setConfig(getSystemConfig());
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleSaveGlobalSettings = async () => {
+    const cleanHours = Math.max(0, Math.floor(Number(config.cancellationLimitHours ?? 0)));
+    setIsSavingSettings(true);
+    try {
+      const updated = await bookingService.updateGlobalSettings(
+        {
+          ...config,
+          cancellationLimitHours: cleanHours
+        },
+        adminActor
+      );
+      setConfig(updated);
+      setAuditLogs(getStoredAuditLogs());
+      addToast(
+        cleanHours === 0
+          ? 'Configurações salvas! Profissionais podem excluir/cancelar agendamentos sem restrição de antecedência.'
+          : `Configurações salvas! Prazo mínimo para exclusão/cancelamento definido para ${cleanHours}h de antecedência.`,
+        'success'
+      );
+    } catch (err: any) {
+      addToast(err.message || 'Erro ao salvar configurações no servidor.', 'error');
+    } finally {
+      setIsSavingSettings(false);
     }
   };
 
@@ -1641,18 +1674,112 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                 onChange={e => setConfig({ ...config, closeHour: Number(e.target.value) })}
               />
             </div>
-            <Input
-              label="Regra de Cancelamento (Horas Mínimas de Antecedência)"
-              type="number"
-              value={config.cancellationLimitHours.toString()}
-              onChange={e => setConfig({ ...config, cancellationLimitHours: Number(e.target.value) })}
-            />
-            <div className="pt-4 flex justify-end">
-              <Button onClick={() => {
-                saveSystemConfig(config);
-                addToast('Configurações salvas com sucesso!', 'success');
-              }}>
-                Salvar Configurações
+            {/* Card Destacado: Tempo para Profissionais Excluírem / Cancelarem um Agendamento */}
+            <div className="p-5 rounded-3xl bg-teal-50/60 border-2 border-teal-200 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-teal-600 text-white flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
+                    <Clock size={20} />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-gray-900">
+                      Tempo Limite para Profissionais Excluírem / Cancelarem Agendamentos
+                    </h4>
+                    <p className="text-xs text-gray-600 mt-0.5 leading-relaxed">
+                      Defina com quantas horas mínimas de antecedência os profissionais podem excluir ou cancelar um agendamento próprio sem precisar acionar a administração.
+                    </p>
+                  </div>
+                </div>
+                <span className="bg-white text-teal-800 border border-teal-200 text-[11px] font-black px-3 py-1 rounded-xl shrink-0 self-start sm:self-center">
+                  Atual: {Number(config.cancellationLimitHours) === 0 ? 'Livre (0h)' : `${config.cancellationLimitHours}h antes`}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-end">
+                <div>
+                  <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                    Antecedência Mínima exigida (em Horas)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={720}
+                    value={config.cancellationLimitHours.toString()}
+                    onChange={e =>
+                      setConfig({
+                        ...config,
+                        cancellationLimitHours: Math.max(0, Number(e.target.value))
+                      })
+                    }
+                    className="w-full px-4 py-2.5 bg-white border-2 border-teal-200 rounded-2xl text-sm font-black text-gray-900 focus:outline-none focus:border-teal-600"
+                  />
+                </div>
+
+                <div>
+                  <span className="block text-[10px] font-black text-gray-500 uppercase tracking-wider mb-1.5">
+                    Atalhos Rápidos de Tempo:
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      { label: 'Sem limite (0h)', value: 0 },
+                      { label: '2h', value: 2 },
+                      { label: '6h', value: 6 },
+                      { label: '12h', value: 12 },
+                      { label: '24h', value: 24 },
+                      { label: '48h', value: 48 },
+                      { label: '72h', value: 72 }
+                    ].map(preset => {
+                      const isSelected = Number(config.cancellationLimitHours) === preset.value;
+                      return (
+                        <button
+                          key={preset.value}
+                          type="button"
+                          onClick={() => setConfig({ ...config, cancellationLimitHours: preset.value })}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-black transition-all border ${
+                            isSelected
+                              ? 'bg-teal-600 text-white border-teal-600 shadow-xs'
+                              : 'bg-white text-gray-700 border-gray-200 hover:border-teal-400'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <p className="text-[11px] text-teal-900 bg-white/80 px-3.5 py-2 rounded-xl border border-teal-100">
+                {Number(config.cancellationLimitHours) === 0 ? (
+                  <>
+                    <strong>Regra ativa:</strong> Os profissionais podem excluir/cancelar seus agendamentos a qualquer momento (0h de antecedência).
+                  </>
+                ) : (
+                  <>
+                    <strong>Regra ativa:</strong> Os profissionais só podem excluir/cancelar um agendamento até{' '}
+                    <strong>{config.cancellationLimitHours} {Number(config.cancellationLimitHours) === 1 ? 'hora' : 'horas'} antes</strong> do início da reserva. Após esse prazo, somente o Administrador poderá excluir.
+                  </>
+                )}
+              </p>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <Button
+                disabled={isSavingSettings}
+                onClick={handleSaveGlobalSettings}
+                className="flex items-center gap-2"
+              >
+                {isSavingSettings ? (
+                  <>
+                    <RefreshCw size={15} className="animate-spin" />
+                    <span>Salvando Configurações...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check size={16} />
+                    <span>Salvar Configurações</span>
+                  </>
+                )}
               </Button>
             </div>
           </div>

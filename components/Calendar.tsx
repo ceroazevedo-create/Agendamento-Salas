@@ -41,6 +41,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
   const [myClients, setMyClients] = useState<Client[]>([]);
   const [unblockedHolidays, setUnblockedHolidays] = useState<string[]>([]);
   const [isGlobalAllowed, setIsGlobalAllowed] = useState<boolean>(false);
+  const [cancellationLimitHours, setCancellationLimitHours] = useState<number>(24);
 
   // Quick Booking Modal State
   const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
@@ -71,12 +72,13 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
 
   const loadData = async () => {
     try {
-      const [bookingsRes, blocksRes, roomsRes, holidaysRes, globalHolidaysRes] = await Promise.allSettled([
+      const [bookingsRes, blocksRes, roomsRes, holidaysRes, globalHolidaysRes, settingsRes] = await Promise.allSettled([
         bookingService.getAllBookings(),
         bookingService.getBlockedSlots(),
         bookingService.getRooms(),
         bookingService.getUnblockedHolidays(),
-        bookingService.isGlobalHolidaysAllowed()
+        bookingService.isGlobalHolidaysAllowed(),
+        bookingService.getGlobalSettings()
       ]);
 
       if (bookingsRes.status === 'fulfilled' && bookingsRes.value) {
@@ -101,6 +103,10 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
 
       if (globalHolidaysRes.status === 'fulfilled') {
         setIsGlobalAllowed(globalHolidaysRes.value);
+      }
+
+      if (settingsRes.status === 'fulfilled' && settingsRes.value) {
+        setCancellationLimitHours(settingsRes.value.cancellationLimitHours);
       }
 
       try {
@@ -1346,6 +1352,12 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                 </span>
               </div>
             </div>
+
+            {!isAdmin && selectedBooking.userId === user.id && cancellationLimitHours > 0 && (
+              <div className="bg-amber-50 border border-amber-100 rounded-xl p-2.5 text-[11px] text-amber-800 font-medium">
+                Política de exclusão/cancelamento: antecedência mínima de <strong>{cancellationLimitHours}h</strong> antes do horário agendado.
+              </div>
+            )}
 
             {/* Ações: Cancelamento ou Fechar */}
             <div className="pt-2 flex justify-between items-center gap-3">

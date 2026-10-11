@@ -54,15 +54,17 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
   // Cancellation Modal
   const [bookingToCancel, setBookingToCancel] = useState<Booking | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [cancellationLimitHours, setCancellationLimitHours] = useState<number>(24);
 
   const { addToast } = useToast();
 
   const loadUserData = async () => {
     setIsLoading(true);
     try {
-      const [bookingsRes, clientsRes] = await Promise.allSettled([
+      const [bookingsRes, clientsRes, settingsRes] = await Promise.allSettled([
         bookingService.getBookingsByProfessional(user.id),
-        clientService.getClientsByProfessional(user.id)
+        clientService.getClientsByProfessional(user.id),
+        bookingService.getGlobalSettings()
       ]);
 
       if (bookingsRes.status === 'fulfilled' && bookingsRes.value) {
@@ -70,6 +72,9 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
       }
       if (clientsRes.status === 'fulfilled' && clientsRes.value) {
         setClients(clientsRes.value);
+      }
+      if (settingsRes.status === 'fulfilled' && settingsRes.value) {
+        setCancellationLimitHours(settingsRes.value.cancellationLimitHours);
       }
     } catch (err: any) {
       console.warn('Aviso ao carregar dados do profissional:', err);
@@ -812,7 +817,9 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
             )}
           </p>
           <p className="text-[11px] text-gray-400">
-            Lembramos que a política de cancelamento permite cancelamentos com no mínimo 24h de antecedência.
+            {cancellationLimitHours > 0
+              ? `Lembramos que a política vigente exige antecedência mínima de ${cancellationLimitHours}h para exclusão/cancelamento.`
+              : 'O cancelamento desta reserva liberará imediatamente o horário na agenda.'}
           </p>
           <div className="pt-4 flex justify-center gap-3">
             <Button variant="secondary" onClick={() => setBookingToCancel(null)}>
