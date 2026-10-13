@@ -976,14 +976,13 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                   key={room}
                   type="button"
                   onClick={() => setBookingRoom(room)}
-                  className={`py-3 px-4 rounded-2xl text-xs font-black uppercase tracking-wider border-2 transition-all flex items-center justify-between ${
+                  className={`py-3 px-4 rounded-2xl text-xs font-black uppercase tracking-wider border-2 transition-all flex items-center justify-center ${
                     bookingRoom === room
                       ? 'border-teal-600 bg-teal-50/50 text-teal-800'
                       : 'border-gray-200 text-gray-500 hover:border-gray-300'
                   }`}
                 >
                   <span>{room}</span>
-                  <span className="text-[10px] text-teal-600 font-bold">R$ 40/h</span>
                 </button>
               ))}
             </div>
@@ -1254,9 +1253,11 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                   const bDay = bookingDate ? new Date(Number(bookingDate.split('-')[0]), Number(bookingDate.split('-')[1]) - 1, Number(bookingDate.split('-')[2])).getDay() : 1;
                   const closeH = getClosingHourForDate(bDay) || hoursEnd;
                   const periodHours = closeH - hoursStart;
+                  const currentRoom = rooms.find(r => r.id === bookingRoom);
+                  const roomHourlyRate = currentRoom?.hourlyRate || 40;
                   return bookingType === 'PERIOD' 
                     ? `Tarifa do Período (${periodHours}h)` 
-                    : `${bookingDuration}h × R$ 40,00/h`;
+                    : `${bookingDuration}h × R$ ${roomHourlyRate.toFixed(2)}/h`;
                 })()}
               </span>
             </div>
