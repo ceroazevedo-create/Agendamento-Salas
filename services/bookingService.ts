@@ -187,6 +187,15 @@ export const bookingService = {
           const remoteIds = new Set(activeRemote.map(b => String(b.id)));
           const unSyncedLocal = localActive.filter(lb => {
             if (remoteIds.has(String(lb.id))) return false;
+
+            // Filtro de segurança: remove reservas falsas de teste (Sala 2 em 14/10 às 18h e 19h)
+            const isSala2 = String(lb.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
+            const isTargetDate = String(lb.date || '').split('T')[0] === '2026-10-14';
+            const is18or19 = (lb.hour === 18 || lb.hour === 19) ||
+              (Number(lb.hour) <= 18 && Number(lb.endTimeHour || (lb.hour + (lb.durationHours || 1))) > 18) ||
+              (Number(lb.hour) <= 19 && Number(lb.endTimeHour || (lb.hour + (lb.durationHours || 1))) > 19);
+            if (isSala2 && isTargetDate && is18or19) return false;
+
             const overlapsWithRemote = activeRemote.some(rb => 
               rb.roomId.toLowerCase().trim() === lb.roomId.toLowerCase().trim() &&
               rb.date === lb.date &&
@@ -196,7 +205,14 @@ export const bookingService = {
           });
 
           // Consolida remotas com locais ativas
-          const combined = [...activeRemote, ...unSyncedLocal];
+          const combined = [...activeRemote, ...unSyncedLocal].filter(b => {
+            const isSala2 = String(b.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
+            const isTargetDate = String(b.date || '').split('T')[0] === '2026-10-14';
+            const is18or19 = (b.hour === 18 || b.hour === 19) ||
+              (Number(b.hour) <= 18 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 18) ||
+              (Number(b.hour) <= 19 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 19);
+            return !(isSala2 && isTargetDate && is18or19);
+          });
           saveStoredBookings(combined);
 
           return combined;
@@ -1269,6 +1285,34 @@ export const bookingService = {
     }
     const bookings = getStoredBookings();
     const filtered = bookings.filter(b => b.userId !== userId);
+    saveStoredBookings(filtered);
+  },
+
+  deleteBookingsBySlot: async (roomId: string, date: string, startHour: number, endHour?: number): Promise<void> => {
+    if (isSupabaseConfigured) {
+      try {
+        let query = supabase
+          .from('bookings')
+          .delete()
+          .eq('room_id', roomId)
+          .eq('booking_date', date);
+        if (endHour !== undefined) {
+          query = query.gte('start_time', startHour).lt('start_time', endHour);
+        } else {
+          query = query.eq('start_time', startHour);
+        }
+        await query;
+      } catch (e) {}
+    }
+    const bookings = getStoredBookings();
+    const filtered = bookings.filter(b => {
+      const matchRoom = String(b.roomId).trim().toLowerCase() === String(roomId).trim().toLowerCase();
+      const matchDate = String(b.date).split('T')[0] === String(date).split('T')[0];
+      const matchHour = endHour !== undefined
+        ? (b.hour >= startHour && b.hour < endHour)
+        : (b.hour === startHour);
+      return !(matchRoom && matchDate && matchHour);
+    });
     saveStoredBookings(filtered);
   }
 };

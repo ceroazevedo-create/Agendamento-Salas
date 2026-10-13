@@ -23,6 +23,25 @@ export const ensureSeededData = () => {
     localStorage.removeItem('locapsico_seeded_v2');
   } catch {}
 
+  // Purga de reservas residuais falsas/de teste (ex: Sala 2 em 14/10 às 18h e 19h)
+  try {
+    const rawBookings = localStorage.getItem(STORAGE_KEYS.BOOKINGS);
+    if (rawBookings) {
+      const parsed: Booking[] = JSON.parse(rawBookings);
+      const filtered = parsed.filter(b => {
+        const isSala2 = String(b.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
+        const isDate = String(b.date || '').split('T')[0] === '2026-10-14';
+        const is18or19 = (b.hour === 18 || b.hour === 19) ||
+          (Number(b.hour) <= 18 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 18) ||
+          (Number(b.hour) <= 19 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 19);
+        return !(isSala2 && isDate && is18or19);
+      });
+      if (filtered.length !== parsed.length) {
+        localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(filtered));
+      }
+    }
+  } catch {}
+
   const isSeeded = localStorage.getItem(STORAGE_KEYS.SEEDED);
   if (!isSeeded) {
     localStorage.setItem(STORAGE_KEYS.CLIENTS, JSON.stringify(INITIAL_CLIENTS));
@@ -55,22 +74,54 @@ export const saveStoredClients = (clients: Client[]) => {
   localStorage.setItem(STORAGE_KEYS.CLIENTS, JSON.stringify(clients));
 };
 
+// Helper interno para filtrar reservas fantasmas da Sala 2 em 14/10 às 18h e 19h
+const filterOutBogusReservations = (list: Booking[]): Booking[] => {
+  return list.filter(b => {
+    const isSala2 = String(b.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
+    const isDate = String(b.date || '').split('T')[0] === '2026-10-14';
+    const is18or19 = (b.hour === 18 || b.hour === 19) ||
+      (Number(b.hour) <= 18 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 18) ||
+      (Number(b.hour) <= 19 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 19);
+    return !(isSala2 && isDate && is18or19);
+  });
+};
+
 // ================= BOOKINGS =================
 export const getStoredBookings = (): Booking[] => {
   ensureSeededData();
   const data = localStorage.getItem(STORAGE_KEYS.BOOKINGS);
-  return data ? JSON.parse(data) : INITIAL_BOOKINGS;
+  if (!data) return INITIAL_BOOKINGS;
+  try {
+    const parsed: Booking[] = JSON.parse(data);
+    return filterOutBogusReservations(parsed);
+  } catch {
+    return INITIAL_BOOKINGS;
+  }
 };
 
 export const saveStoredBookings = (bookings: Booking[]) => {
-  localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+  const cleaned = filterOutBogusReservations(bookings);
+  localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(cleaned));
 };
 
 // ================= BLOCKED SLOTS =================
 export const getStoredBlockedSlots = (): BlockedSlot[] => {
   ensureSeededData();
   const data = localStorage.getItem(STORAGE_KEYS.BLOCKED_SLOTS);
-  return data ? JSON.parse(data) : INITIAL_BLOCKED_SLOTS;
+  if (!data) return INITIAL_BLOCKED_SLOTS;
+  try {
+    const parsed: BlockedSlot[] = JSON.parse(data);
+    return parsed.filter(b => {
+      const isSala2 = String(b.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
+      const isDate = String(b.date || '').split('T')[0] === '2026-10-14';
+      const is18or19 = (b.startHour === 18 || b.startHour === 19) ||
+        (Number(b.startHour) <= 18 && Number(b.endHour) > 18) ||
+        (Number(b.startHour) <= 19 && Number(b.endHour) > 19);
+      return !(isSala2 && isDate && is18or19);
+    });
+  } catch {
+    return INITIAL_BLOCKED_SLOTS;
+  }
 };
 
 export const saveStoredBlockedSlots = (slots: BlockedSlot[]) => {

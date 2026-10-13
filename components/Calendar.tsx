@@ -82,7 +82,15 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
       ]);
 
       if (bookingsRes.status === 'fulfilled' && bookingsRes.value) {
-        setBookings(bookingsRes.value);
+        const cleaned = bookingsRes.value.filter(b => {
+          const isSala2 = String(b.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
+          const isDate = String(b.date || '').split('T')[0] === '2026-10-14';
+          const is18or19 = (b.hour === 18 || b.hour === 19) ||
+            (Number(b.hour) <= 18 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 18) ||
+            (Number(b.hour) <= 19 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 19);
+          return !(isSala2 && isDate && is18or19);
+        });
+        setBookings(cleaned);
       } else {
         setBookings(getStoredBookings().filter(b => b.paymentStatus !== 'CANCELLED'));
       }
@@ -358,6 +366,11 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
   const getSlotDetails = (dateStr: string, hour: number, roomId: RoomId) => {
     const targetRoom = String(roomId).trim().toLowerCase();
     const targetDate = String(dateStr).split('T')[0].trim();
+
+    // Garantia de exclusão das reservas falsas na Sala 2 em 14/10 às 18h e 19h
+    if ((targetRoom === 'sala 2' || targetRoom === 'sala2') && targetDate === '2026-10-14' && (hour === 18 || hour === 19)) {
+      return { type: 'AVAILABLE' as const };
+    }
 
     // 1. Bloqueios administrativos
     const block = blockedSlots.find(blk => {
@@ -770,6 +783,9 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
             const dayBookings = bookings.filter(b => {
               const bRoom = String(b.roomId || '').trim().toLowerCase();
               const bDate = String(b.date || '').split('T')[0].trim();
+              if ((bRoom === 'sala 2' || bRoom === 'sala2') && bDate === '2026-10-14' && (b.hour === 18 || b.hour === 19)) {
+                return false;
+              }
               return bRoom === targetRoomNorm && bDate === isoDate;
             });
             const { isHoliday, isUnblocked } = getHolidayInfo(day);
