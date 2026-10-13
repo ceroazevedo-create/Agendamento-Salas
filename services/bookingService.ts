@@ -1128,9 +1128,9 @@ export const bookingService = {
         if (!error && data) {
           const merged: SystemConfig = {
             ...localConfig,
-            establishmentName: data.establishment_name || localConfig.establishmentName,
-            contactEmail: data.contact_email || localConfig.contactEmail,
-            contactPhone: data.contact_phone || localConfig.contactPhone,
+            establishmentName: String(data.establishment_name || localConfig.establishmentName || ''),
+            contactEmail: String(data.contact_email || localConfig.contactEmail || ''),
+            contactPhone: String(data.contact_phone || localConfig.contactPhone || ''),
             openHour: Number(data.open_hour ?? localConfig.openHour ?? 7),
             closeHour: Number(data.close_hour ?? localConfig.closeHour ?? 22),
             cancellationLimitHours: Math.max(

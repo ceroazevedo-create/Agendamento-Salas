@@ -385,7 +385,7 @@ function syncLocalStorageFromBackupData(data: SystemBackupPayload['data']) {
         currentConfig.allowHolidaysGlobal = s.allow_holidays_global;
       }
       if (Array.isArray(s.unblocked_holidays)) {
-        currentConfig.unblocked_holidays = s.unblocked_holidays;
+        currentConfig.unblockedHolidays = s.unblocked_holidays;
       }
     }
     if (Array.isArray(data.rooms) && data.rooms.length > 0) {

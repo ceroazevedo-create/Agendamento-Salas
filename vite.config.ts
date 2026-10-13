@@ -13,11 +13,15 @@ export default defineConfig(({ mode }) => {
         ? env.VITE_SUPABASE_ANON_KEY
         : 'sb_publishable_idoSyVhNDWy33hjn4xCUpw_wjpcB8CS';
 
+    const isGitHubActions = process.env.GITHUB_ACTIONS === 'true';
+    const base = env.VITE_BASE || (isGitHubActions ? '/Agendamento-Salas/' : '/');
+
     return {
-      base: '/Agendamento-Salas/',
+      base,
       server: {
         port: 3000,
         host: '0.0.0.0',
+        hmr: false,
       },
       plugins: [react()],
       define: {

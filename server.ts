@@ -1065,7 +1065,10 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
 async function start() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1082,4 +1085,7 @@ async function start() {
   });
 }
 
-start();
+start().catch((err) => {
+  console.error('Falha crítica ao inicializar o servidor:', err);
+  process.exit(1);
+});
