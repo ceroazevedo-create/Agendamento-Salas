@@ -1,8 +1,15 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Booking, RoomId, User, Client, BlockedSlot, BookingType, Room, PeriodShift } from '../types';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  Booking, RoomId, User, Client, BlockedSlot, BookingType, Room, PeriodShift,
+  RecurrenceFrequency, RecurrenceEndType, RecurrenceConfig, RecurrencePreviewSummary 
+} from '../types';
 import { bookingService } from '../services/bookingService';
 import { clientService } from '../services/clientService';
 import { getStoredBookings, getStoredBlockedSlots } from '../services/storageService';
+import { 
+  previewRecurringSeries, createRecurringSeries, 
+  getSeriesBookings, cancelSeriesBookings 
+} from '../services/recurrenceService';
 import { 
   DAYS_OF_WEEK, HOLIDAYS, getClosingHourForDate, SATURDAY_HOURS_END,
   BOOKING_PERIODS, getPeriodConfig, INITIAL_PERIOD_RATES 
@@ -17,7 +24,7 @@ import {
   ChevronLeft, ChevronRight, CheckCircle, Clock, 
   MapPin, AlertTriangle, User as UserIcon, Palmtree, 
   ShieldAlert, Ban, Plus, X, Calendar as CalendarIcon, FileText,
-  Sunrise, Sun, Moon
+  Sunrise, Sun, Moon, Repeat, CalendarRange, ListFilter, RotateCcw
 } from 'lucide-react';
 import { Modal } from './Modal';
 import { Button } from './Button';
@@ -56,11 +63,32 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
   const [conflictStatus, setConflictStatus] = useState<{ hasConflict: boolean; reason?: string }>({ hasConflict: false });
   const [isCheckingConflict, setIsCheckingConflict] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef<boolean>(false);
+
+  // Estados de Agendamento Recorrente (Seção 2 e 3)
+  const [isRecurringMode, setIsRecurringMode] = useState<boolean>(false);
+  const [recFrequency, setRecFrequency] = useState<RecurrenceFrequency>('WEEKLY');
+  const [recWeekdays, setRecWeekdays] = useState<number[]>([1]); // 1 = Segunda
+  const [recEndType, setRecEndType] = useState<RecurrenceEndType>('OCCURRENCES');
+  const [recEndDate, setRecEndDate] = useState<string>(() => format(addMonths(new Date(), 1), 'yyyy-MM-dd'));
+  const [recOccurrencesCount, setRecOccurrencesCount] = useState<number>(4);
+  const [recPreviewSummary, setRecPreviewSummary] = useState<RecurrencePreviewSummary | null>(null);
+  const [isLoadingRecPreview, setIsLoadingRecPreview] = useState<boolean>(false);
+  const [recSkipConflicts, setRecSkipConflicts] = useState<boolean>(false);
+  const [showSummaryView, setShowSummaryView] = useState<boolean>(false);
+  const [recIdempotencyKey, setRecIdempotencyKey] = useState<string>('');
 
   // Manage / Details Modal State
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
+
+  // Modal da Série Completa e Ações em Massa (Seção 9)
+  const [isSeriesModalOpen, setIsSeriesModalOpen] = useState<boolean>(false);
+  const [seriesBookings, setSeriesBookings] = useState<Booking[]>([]);
+  const [isLoadingSeries, setIsLoadingSeries] = useState<boolean>(false);
+  const [isCancellingSeries, setIsCancellingSeries] = useState<boolean>(false);
+  const [confirmCancelFuture, setConfirmCancelFuture] = useState<boolean>(false);
 
   const { addToast } = useToast();
   const isAdmin = user.role === 'ADMIN';
@@ -259,24 +287,190 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
     setBookingDuration(1);
     setBookingType('HOURLY');
     setBookingNotes('');
+    setIsRecurringMode(false);
+    setShowSummaryView(false);
+    setRecFrequency('WEEKLY');
+    const dow = dayOfWeek === 0 ? 1 : dayOfWeek;
+    setRecWeekdays([dow]);
+    setRecEndType('OCCURRENCES');
+    setRecOccurrencesCount(4);
+    setRecEndDate(format(addMonths(date, 1), 'yyyy-MM-dd'));
+    setRecPreviewSummary(null);
+    setRecSkipConflicts(false);
+    setRecIdempotencyKey('');
     setIsBookingModalOpen(true);
   };
 
   // Click on Existing Booking -> Open Details & Manage Modal
   const handleBookingClick = (booking: Booking) => {
     setSelectedBooking(booking);
+    setConfirmCancelFuture(false);
     setIsDetailsModalOpen(true);
   };
 
-  // Confirm booking
+  // Carrega e atualiza a prévia da série recorrente
+  const handleGenerateRecSummary = async () => {
+    setIsLoadingRecPreview(true);
+    try {
+      const summary = await previewRecurringSeries({
+        roomId: bookingRoom,
+        startDate: bookingDate,
+        hour: bookingStartHour,
+        durationHours: bookingDuration,
+        type: bookingType,
+        periodShift: bookingPeriodShift,
+        config: {
+          frequency: recFrequency,
+          weekdays: recWeekdays,
+          startDate: bookingDate,
+          endType: recEndType,
+          endDate: recEndDate,
+          occurrencesCount: recOccurrencesCount
+        }
+      });
+      setRecPreviewSummary(summary);
+      setShowSummaryView(true);
+      // Gera nova chave para a intenção calculada se ainda não definida
+      if (!recIdempotencyKey) {
+        const generatedKey = (typeof crypto !== 'undefined' && crypto.randomUUID)
+          ? `rec-${user.id}-${crypto.randomUUID()}`
+          : `rec-${user.id}-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+        setRecIdempotencyKey(generatedKey);
+      }
+    } catch (err: any) {
+      addToast(err.message || 'Erro ao gerar prévia da série recorrente.', 'error');
+    } finally {
+      setIsLoadingRecPreview(false);
+    }
+  };
+
+  // Confirm booking (Único ou Recorrente)
   const handleConfirmBooking = async () => {
+    // Trava síncrona contra múltiplos cliques concorrentes imediatos
+    if (isSubmittingRef.current || isSubmitting) return;
+
+    // FLUXO DE AGENDAMENTO RECORRENTE
+    if (isRecurringMode) {
+      if (!showSummaryView || !recPreviewSummary) {
+        await handleGenerateRecSummary();
+        return;
+      }
+
+      if (recPreviewSummary.availableCount === 0) {
+        return addToast('Todas as datas da série possuem conflito. Nenhuma reserva pode ser criada.', 'error');
+      }
+
+      if (recPreviewSummary.conflictCount > 0 && !recSkipConflicts) {
+        return addToast('Existem conflitos na série. Confirme criar somente as datas disponíveis ou ajuste a regra.', 'warning');
+      }
+
+      // Validação do paciente/cliente antes de despachar a transação
+      let validClientId: string | undefined = undefined;
+      let validClientName: string | undefined = undefined;
+      if (selectedClientId && selectedClientId.trim() !== '') {
+        const trimmed = selectedClientId.trim();
+        const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trimmed);
+        if (!isUUID) {
+          return addToast('O paciente/cliente selecionado possui identificador inválido. Por favor, recadastre o paciente.', 'error');
+        }
+        validClientId = trimmed;
+        validClientName = myClients.find(c => c.id === validClientId)?.name;
+      }
+
+      isSubmittingRef.current = true;
+      setIsSubmitting(true);
+      try {
+        const isPeriod = bookingType === 'PERIOD';
+        const periodConf = getPeriodConfig(bookingPeriodShift, bookingDate);
+        const startHour = isPeriod ? periodConf.startHour : bookingStartHour;
+        const durationHours = isPeriod ? periodConf.duration : bookingDuration;
+
+        // Se por algum motivo a chave estiver vazia, gera uma identificação intencional
+        const effectiveKey = recIdempotencyKey || (
+          (typeof crypto !== 'undefined' && crypto.randomUUID)
+            ? `rec-${user.id}-${crypto.randomUUID()}`
+            : `rec-${user.id}-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
+        );
+
+        const result = await createRecurringSeries({
+          userId: user.id,
+          userEmail: user.email,
+          userName: user.name,
+          clientId: validClientId,
+          clientName: validClientName,
+          roomId: bookingRoom,
+          type: bookingType,
+          hour: startHour,
+          durationHours,
+          periodShift: isPeriod ? bookingPeriodShift : undefined,
+          periodName: isPeriod ? periodConf.name : undefined,
+          notes: bookingNotes,
+          config: {
+            frequency: recFrequency,
+            weekdays: recWeekdays,
+            startDate: bookingDate,
+            endType: recEndType,
+            endDate: recEndDate,
+            occurrencesCount: recOccurrencesCount
+          },
+          skipConflicts: recSkipConflicts,
+          idempotencyKey: effectiveKey
+        });
+
+        // Transação gravada com sucesso: fecha o modal e limpa a chave da sessão
+        setIsBookingModalOpen(false);
+        setShowSummaryView(false);
+        setRecIdempotencyKey('');
+
+        const countConfirmed = result.createdCount ?? (result.createdBookings.length > 0 ? result.createdBookings.length : result.requestedCount);
+        const msgSuccess = `Série recorrente criada com sucesso! ${countConfirmed} reservas confirmadas.${result.skippedDates.length > 0 ? ` (${result.skippedDates.length} datas com conflito ignoradas)` : ''}`;
+
+        let refreshFailed = false;
+        try {
+          await loadData();
+        } catch (loadErr) {
+          console.warn('Aviso: Falha ao recarregar agenda após confirmação:', loadErr);
+          refreshFailed = true;
+        }
+
+        if (refreshFailed) {
+          addToast(
+            `${msgSuccess} (Atenção: Houve instabilidade ao atualizar a visualização da agenda. Por favor, atualize a página se necessário.)`,
+            'warning'
+          );
+        } else {
+          addToast(msgSuccess, 'success');
+        }
+      } catch (err: any) {
+        // Em caso de falha de comunicação ou timeout, mantém recIdempotencyKey para repetição com os mesmos parâmetros
+        addToast(err.message || 'Erro ao criar série recorrente.', 'error');
+      } finally {
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
+    // FLUXO DE AGENDAMENTO ÚNICO TRADICIONAL
     if (conflictStatus.hasConflict) {
       return addToast(conflictStatus.reason || 'Este horário não está disponível.', 'error');
     }
 
+    let singleClientId: string | undefined = undefined;
+    let singleClientName: string | undefined = undefined;
+    if (selectedClientId && selectedClientId.trim() !== '') {
+      const trimmed = selectedClientId.trim();
+      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trimmed);
+      if (!isUUID) {
+        return addToast('O paciente/cliente selecionado possui identificador inválido. Por favor, recadastre o paciente.', 'error');
+      }
+      singleClientId = trimmed;
+      singleClientName = myClients.find(c => c.id === singleClientId)?.name;
+    }
+
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
     try {
-      const selectedClient = myClients.find(c => c.id === selectedClientId);
       const isPeriod = bookingType === 'PERIOD';
       const periodConf = getPeriodConfig(bookingPeriodShift, bookingDate);
       const startHour = isPeriod ? periodConf.startHour : bookingStartHour;
@@ -286,8 +480,8 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
         userId: user.id,
         userEmail: user.email,
         userName: user.name,
-        clientId: selectedClientId || undefined,
-        clientName: selectedClient?.name || undefined,
+        clientId: singleClientId,
+        clientName: singleClientName,
         roomId: bookingRoom,
         date: bookingDate,
         hour: startHour,
@@ -304,6 +498,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
     } catch (err: any) {
       addToast(err.message || 'Erro ao realizar reserva.', 'error');
     } finally {
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -330,6 +525,49 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
     }
   };
 
+  // Abertura da Série Completa
+  const handleOpenSeriesModal = async (seriesId: string) => {
+    setIsLoadingSeries(true);
+    setIsSeriesModalOpen(true);
+    setConfirmCancelFuture(false);
+    try {
+      const list = await getSeriesBookings(seriesId);
+      setSeriesBookings(list);
+    } catch (err: any) {
+      addToast('Erro ao carregar dados da série.', 'error');
+    } finally {
+      setIsLoadingSeries(false);
+    }
+  };
+
+  // Cancelamento de Ocorrências Futuras da Série
+  const handleCancelFutureOccurrences = async () => {
+    if (!selectedBooking?.recurrenceId) return;
+    setIsCancellingSeries(true);
+    try {
+      const result = await cancelSeriesBookings(
+        selectedBooking.recurrenceId,
+        selectedBooking.date,
+        {
+          id: user.id,
+          name: user.name,
+          role: user.role,
+          email: user.email
+        }
+      );
+      addToast(`Foram canceladas ${result.cancelledCount} ocorrências da série a partir de ${selectedBooking.date}.`, 'success');
+      setIsDetailsModalOpen(false);
+      setIsSeriesModalOpen(false);
+      setSelectedBooking(null);
+      setConfirmCancelFuture(false);
+      await loadData();
+    } catch (err: any) {
+      addToast(err.message || 'Erro ao cancelar ocorrências futuras.', 'error');
+    } finally {
+      setIsCancellingSeries(false);
+    }
+  };
+
   // Calculate modal dynamic price
   const modalCalculatedPrice = useMemo(() => {
     const room = rooms.find(r => r.id === bookingRoom) || { 
@@ -344,7 +582,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
       if (bookingPeriodShift === 'FULL_DAY') {
         const isSat = getClosingHourForDate(bookingDate) === SATURDAY_HOURS_END;
         const base = room.dailyRate || room.fullDayRate || INITIAL_PERIOD_RATES.FULL_DAY;
-        return isSat ? Math.round(base * (7 / 15)) : base;
+        return isSat ? Number((base * (7 / 15)).toFixed(2)) : base;
       }
       if (bookingPeriodShift === 'MORNING') {
         return room.morningRate || INITIAL_PERIOD_RATES.MORNING;
@@ -352,7 +590,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
       if (bookingPeriodShift === 'AFTERNOON') {
         const isSat = getClosingHourForDate(bookingDate) === SATURDAY_HOURS_END;
         const base = room.afternoonRate || INITIAL_PERIOD_RATES.AFTERNOON;
-        return isSat ? Math.round(base * (2 / 6)) : base;
+        return isSat ? Number((base * (2 / 6)).toFixed(2)) : base;
       }
       if (bookingPeriodShift === 'NIGHT') {
         return room.nightRate || INITIAL_PERIOD_RATES.NIGHT;
@@ -514,6 +752,16 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                   >
                     <div className="flex items-center gap-2 truncate">
                       <div className={`w-2 h-2 rounded-full ${isMine ? 'bg-white' : 'bg-emerald-500'}`}></div>
+                      {b.recurrenceId && (
+                        <span 
+                          title={`Agendamento Recorrente (Ocorrência ${b.recurrenceIndex || 1} de ${b.recurrenceTotal || 1})`}
+                          className={`p-1 rounded-md flex items-center shrink-0 ${
+                            isMine ? 'bg-white/20 text-white' : 'bg-teal-100 text-teal-800'
+                          }`}
+                        >
+                          <Repeat size={11} />
+                        </span>
+                      )}
                       <span className="text-xs font-black uppercase tracking-tight truncate">
                         {isMine
                           ? `Sua Reserva ${b.clientName ? `— ${b.clientName}` : ''}`
@@ -713,15 +961,20 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                           : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
                       }`}>
                         <div className="flex items-center justify-between">
-                          <span className="text-[9px] font-black uppercase tracking-tight truncate">
-                            {slot.isMine
-                              ? (slot.booking.clientName || 'Sua Reserva')
-                              : isAdmin
-                              ? (slot.booking.userName?.split(' ')[0] || 'Profissional')
-                              : 'Indisponível'
-                            }
-                          </span>
-                          <span className={`w-1.5 h-1.5 rounded-full ${slot.isMine ? 'bg-white' : 'bg-emerald-500'}`}></span>
+                          <div className="flex items-center gap-1 min-w-0">
+                            {slot.booking.recurrenceId && (
+                              <Repeat size={9} className="shrink-0 opacity-80" title={`Recorrente (${slot.booking.recurrenceIndex || 1}/${slot.booking.recurrenceTotal || 1})`} />
+                            )}
+                            <span className="text-[9px] font-black uppercase tracking-tight truncate">
+                              {slot.isMine
+                                ? (slot.booking.clientName || 'Sua Reserva')
+                                : isAdmin
+                                ? (slot.booking.userName?.split(' ')[0] || 'Profissional')
+                                : 'Indisponível'
+                              }
+                            </span>
+                          </div>
+                          <span className={`w-1.5 h-1.5 rounded-full ${slot.isMine ? 'bg-white' : 'bg-emerald-500'} shrink-0 ml-1`}></span>
                         </div>
                         <span className="text-[8px] opacity-80 uppercase tracking-tighter truncate">
                           {slot.booking.type === 'PERIOD' ? (slot.booking.periodName ? `Período ${slot.booking.periodName}` : 'Período') : `${targetRoom}`}
@@ -975,343 +1228,767 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
       </div>
 
       {/* ================= MODAL NOVA LOCAÇÃO (Seção 2, 22) ================= */}
+      {/* ================= MODAL NOVA LOCAÇÃO (ÚNICA OU RECORRENTE) ================= */}
       <Modal
         isOpen={isBookingModalOpen}
-        onClose={() => setIsBookingModalOpen(false)}
-        title="Nova Locação"
+        onClose={() => {
+          setIsBookingModalOpen(false);
+          setShowSummaryView(false);
+        }}
+        title={
+          isRecurringMode 
+            ? (showSummaryView ? 'Resumo da Série Recorrente' : 'Novo Agendamento Recorrente') 
+            : 'Nova Locação'
+        }
       >
         <div className="space-y-5">
-          {/* Escolha da Sala */}
-          <div>
-            <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
-              Sala Selecionada
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              {(['Sala 1', 'Sala 2'] as RoomId[]).map(room => (
-                <button
-                  key={room}
-                  type="button"
-                  onClick={() => setBookingRoom(room)}
-                  className={`py-3 px-4 rounded-2xl text-xs font-black uppercase tracking-wider border-2 transition-all flex items-center justify-center ${
-                    bookingRoom === room
-                      ? 'border-teal-600 bg-teal-50/50 text-teal-800'
-                      : 'border-gray-200 text-gray-500 hover:border-gray-300'
-                  }`}
-                >
-                  <span>{room}</span>
-                </button>
-              ))}
-            </div>
+          {/* Alternador do Tipo de Agendamento: Único vs Recorrente (Seção 2) */}
+          <div className="flex bg-gray-100 p-1 rounded-2xl">
+            <button
+              type="button"
+              onClick={() => {
+                setIsRecurringMode(false);
+                setShowSummaryView(false);
+              }}
+              className={`flex-1 py-2 px-3 text-xs font-black uppercase tracking-wider rounded-xl transition-all ${
+                !isRecurringMode
+                  ? 'bg-white text-teal-800 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-800'
+              }`}
+            >
+              Agendamento Único
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsRecurringMode(true);
+                setShowSummaryView(false);
+                setRecPreviewSummary(null);
+                setRecSkipConflicts(false);
+              }}
+              className={`flex-1 py-2 px-3 text-xs font-black uppercase tracking-wider rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+                isRecurringMode
+                  ? 'bg-teal-600 text-white shadow-sm'
+                  : 'text-gray-500 hover:text-gray-800'
+              }`}
+            >
+              <Repeat size={13} />
+              Agendamento Recorrente
+            </button>
           </div>
 
-          {/* Data e Horário */}
-          {(() => {
-            const parsedBookingDate = bookingDate ? new Date(Number(bookingDate.split('-')[0]), Number(bookingDate.split('-')[1]) - 1, Number(bookingDate.split('-')[2])) : new Date();
-            const bookingDayOfWeek = parsedBookingDate.getDay();
-            const isSaturday = bookingDayOfWeek === 6;
-            const maxClosing = getClosingHourForDate(bookingDayOfWeek) || hoursEnd;
-            const availableHoursForDay = hours.filter(h => h < maxClosing);
-            const maxPeriodDuration = maxClosing - hoursStart;
-
-            return (
-              <>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
-                      Data
-                    </label>
-                    <input
-                      type="date"
-                      value={bookingDate}
-                      onChange={e => {
-                        const newDateStr = e.target.value;
-                        setBookingDate(newDateStr);
-                        if (newDateStr) {
-                          const [y, m, d] = newDateStr.split('-').map(Number);
-                          const newDay = new Date(y, m - 1, d).getDay();
-                          const newMax = getClosingHourForDate(newDay);
-                          if (newMax > 0 && bookingStartHour >= newMax) {
-                            setBookingStartHour(hoursStart);
-                          }
-                        }
-                      }}
-                      className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
-                    />
-                    <span className="text-[10px] text-gray-400 font-medium mt-1 block">
-                      {isSaturday ? (
-                        <strong className="text-teal-700">Aos sábados o atendimento vai até as 14:00.</strong>
-                      ) : (
-                        'Atendimento de seg a sáb (salas fechadas aos domingos).'
-                      )}
+          {/* ================= FLUXO RECORRENTE: TELA 2 (RESUMO & CONFLITOS) ================= */}
+          {isRecurringMode && showSummaryView && recPreviewSummary ? (
+            <div className="space-y-4 animate-fade-in">
+              {/* Card de Resumo Geral (Seção 3.G) */}
+              <div className="bg-teal-50 border border-teal-200/80 rounded-2xl p-4 space-y-3">
+                <div className="flex items-center justify-between border-b border-teal-200/60 pb-2">
+                  <div className="flex items-center gap-2">
+                    <Repeat size={18} className="text-teal-700" />
+                    <span className="text-xs font-black uppercase tracking-wider text-teal-900">
+                      Resumo da Recorrência
                     </span>
                   </div>
+                  <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-teal-200/70 text-teal-900">
+                    {recPreviewSummary.roomId}
+                  </span>
+                </div>
 
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs text-teal-950">
                   <div>
-                    <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
-                      Tipo de Locação
-                    </label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setBookingType('HOURLY')}
-                        className={`py-2.5 px-3 rounded-xl text-[11px] font-black uppercase tracking-wider border transition-all ${
-                          bookingType === 'HOURLY'
-                            ? 'bg-teal-600 text-white border-teal-600 shadow-sm'
-                            : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
-                        }`}
-                      >
-                        Por Hora
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setBookingType('PERIOD');
-                          if (isSaturday && bookingPeriodShift === 'NIGHT') {
-                            setBookingPeriodShift('MORNING');
-                          }
-                        }}
-                        className={`py-2.5 px-3 rounded-xl text-[11px] font-black uppercase tracking-wider border transition-all ${
-                          bookingType === 'PERIOD'
-                            ? 'bg-teal-600 text-white border-teal-600 shadow-sm'
-                            : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
-                        }`}
-                      >
-                        Por Período (Turno)
-                      </button>
-                    </div>
+                    <span className="text-[10px] font-bold text-teal-700 uppercase block">Frequência:</span>
+                    <strong className="font-black">
+                      {recPreviewSummary.frequency === 'WEEKLY' ? 'Semanal' : recPreviewSummary.frequency === 'BIWEEKLY' ? 'Quinzenal' : 'Mensal'}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-teal-700 uppercase block">Primeira Data:</span>
+                    <strong className="font-black">
+                      {format(parseISO(recPreviewSummary.startDate), "dd/MM/yyyy")}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-teal-700 uppercase block">Horário:</span>
+                    <strong className="font-black">
+                      {bookingType === 'PERIOD'
+                        ? `Turno (${bookingPeriodShift})`
+                        : `${bookingStartHour}:00 às ${bookingStartHour + bookingDuration}:00`}
+                    </strong>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-teal-700 uppercase block">Total Previsto:</span>
+                    <strong className="font-black">{recPreviewSummary.totalExpected} ocorrências</strong>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-teal-700 uppercase block">Disponíveis:</span>
+                    <strong className="font-black text-emerald-700">{recPreviewSummary.availableCount} horários</strong>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-teal-700 uppercase block">Conflitos:</span>
+                    <strong className={`font-black ${recPreviewSummary.conflictCount > 0 ? 'text-red-700' : 'text-emerald-700'}`}>
+                      {recPreviewSummary.conflictCount} encontrados
+                    </strong>
                   </div>
                 </div>
 
-                {/* Parâmetros se for por hora */}
-                {bookingType === 'HOURLY' ? (
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
-                        Horário Inicial
-                      </label>
-                      <select
-                        value={bookingStartHour >= maxClosing ? hoursStart : bookingStartHour}
-                        onChange={e => setBookingStartHour(Number(e.target.value))}
-                        className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
-                      >
-                        {availableHoursForDay.map(h => (
-                          <option key={h} value={h}>
-                            {h.toString().padStart(2, '0')}:00
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                <div className="pt-2 border-t border-teal-200/60 flex justify-between items-center">
+                  <span className="text-[11px] font-bold text-teal-800 uppercase tracking-wider">
+                    Valor Estimado Total ({recPreviewSummary.availableCount} vagas):
+                  </span>
+                  <span className="text-xl font-black text-teal-800">
+                    R$ {recPreviewSummary.totalEstimatedAmount.toFixed(2)}
+                  </span>
+                </div>
+              </div>
 
-                    <div>
-                      <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
-                        Duração
-                      </label>
-                      <select
-                        value={bookingDuration}
-                        onChange={e => setBookingDuration(Number(e.target.value))}
-                        className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+              {/* Lista Detalhada de Ocorrências Previstas (Seção 4 e 5) */}
+              <div>
+                <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-2">
+                  Detalhamento de Cada Ocorrência ({recPreviewSummary.occurrences.length})
+                </label>
+                <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
+                  {recPreviewSummary.occurrences.map((occ, idx) => {
+                    const parsed = parseISO(occ.date);
+                    return (
+                      <div
+                        key={occ.date}
+                        className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 text-xs transition-all ${
+                          occ.hasConflict
+                            ? 'bg-red-50/70 border-red-200 text-red-900'
+                            : 'bg-emerald-50/50 border-emerald-200/70 text-gray-800'
+                        }`}
                       >
-                        {[1, 2, 3, 4, 5, 6, 7, 8].filter(d => bookingStartHour + d <= maxClosing).map(d => (
-                          <option key={d} value={d}>
-                            {d} {d === 1 ? 'hora' : 'horas'} (até {bookingStartHour + d}:00)
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-[10px] font-black text-gray-400 w-5">
+                            #{idx + 1}
+                          </span>
+                          <div>
+                            <span className="font-black">
+                              {format(parsed, "dd/MM/yyyy (EEEE)", { locale: ptBR })}
+                            </span>
+                            <span className="text-[11px] text-gray-500 block">
+                              {occ.startHour}:00 às {occ.endHour}:00
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="text-right shrink-0">
+                          {occ.hasConflict ? (
+                            <span className="text-[10px] font-black text-red-700 bg-red-100 px-2 py-0.5 rounded-md block">
+                              ⚠️ Conflito: {occ.conflictReason}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-black text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-md block">
+                              ✓ Disponível (R$ {occ.price.toFixed(2)})
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Tratamento Obrigatório de Conflitos (Seção 5) */}
+              {recPreviewSummary.availableCount === 0 ? (
+                <div className="p-4 bg-red-50 border border-red-200 rounded-2xl text-red-800 text-xs space-y-1">
+                  <div className="flex items-center gap-2 font-black uppercase tracking-wider">
+                    <AlertTriangle size={16} /> Nenhuma Data Disponível
                   </div>
-                ) : (
-                  <div className="space-y-2">
-                    <label className="block text-xs font-black text-gray-700 uppercase tracking-wider">
-                      Selecione o Turno Desejado
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-                      {BOOKING_PERIODS.map(p => {
-                        const conf = getPeriodConfig(p.id, bookingDate);
-                        const isSelected = bookingPeriodShift === p.id;
-                        const isAvailable = conf.isAvailableOnDate;
-                        const roomObj = rooms.find(r => r.id === bookingRoom);
-                        let rate = 0;
-                        if (p.id === 'MORNING') rate = roomObj?.morningRate || INITIAL_PERIOD_RATES.MORNING;
-                        else if (p.id === 'AFTERNOON') {
-                          const base = roomObj?.afternoonRate || INITIAL_PERIOD_RATES.AFTERNOON;
-                          rate = isSaturday ? Math.round(base * (2 / 6)) : base;
-                        } else if (p.id === 'NIGHT') {
-                          rate = roomObj?.nightRate || INITIAL_PERIOD_RATES.NIGHT;
-                        } else {
-                          const base = roomObj?.dailyRate || roomObj?.fullDayRate || INITIAL_PERIOD_RATES.FULL_DAY;
-                          rate = isSaturday ? Math.round(base * (7 / 15)) : base;
-                        }
+                  <p className="text-[11px] leading-relaxed">
+                    Todas as datas calculadas para esta série possuem conflitos com outras reservas ou restrições de funcionamento. Nenhuma locação pode ser gerada. Volte à configuração para escolher outro horário ou sala.
+                  </p>
+                </div>
+              ) : recPreviewSummary.conflictCount > 0 ? (
+                <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 text-xs space-y-3">
+                  <div className="flex items-center gap-2 font-black uppercase tracking-wider text-amber-800">
+                    <AlertTriangle size={16} /> Conflitos Detectados na Série
+                  </div>
+                  <p className="text-[11px] text-amber-800 leading-relaxed">
+                    Foram identificadas <strong>{recPreviewSummary.conflictCount}</strong> datas com conflito. Conforme as regras do LocaPsico, você pode cancelar a operação ou criar exclusivamente as datas disponíveis.
+                  </p>
+                  <label className="flex items-start gap-2.5 p-2 bg-white/70 border border-amber-200 rounded-xl cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={recSkipConflicts}
+                      onChange={e => setRecSkipConflicts(e.target.checked)}
+                      className="mt-0.5 rounded border-amber-400 text-teal-600 focus:ring-teal-500 w-4 h-4"
+                    />
+                    <span className="text-xs font-bold text-amber-950">
+                      <strong>Opção B:</strong> Confirmo e autorizo criar apenas as <strong>{recPreviewSummary.availableCount}</strong> datas disponíveis, ignorando silenciosamente os <strong>{recPreviewSummary.conflictCount}</strong> conflitos.
+                    </span>
+                  </label>
+                </div>
+              ) : (
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-800 text-xs flex items-center gap-2">
+                  <CheckCircle size={16} className="text-emerald-600 shrink-0" />
+                  <span className="font-black uppercase tracking-wider text-[11px]">
+                    ✓ Todas as {recPreviewSummary.totalExpected} datas estão 100% livres e prontas para reserva!
+                  </span>
+                </div>
+              )}
 
-                        return (
+              {/* Botões do Resumo */}
+              <div className="pt-2 flex justify-between items-center gap-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => {
+                    setShowSummaryView(false);
+                    setRecIdempotencyKey('');
+                  }}
+                >
+                  ← Voltar à Configuração
+                </Button>
+
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => {
+                      setIsBookingModalOpen(false);
+                      setShowSummaryView(false);
+                      setRecIdempotencyKey('');
+                    }}
+                  >
+                    Cancelar
+                  </Button>
+                  <Button
+                    type="button"
+                    disabled={
+                      isSubmitting ||
+                      recPreviewSummary.availableCount === 0 ||
+                      (recPreviewSummary.conflictCount > 0 && !recSkipConflicts)
+                    }
+                    onClick={handleConfirmBooking}
+                    className="flex items-center gap-2"
+                  >
+                    {isSubmitting ? (
+                      'Gravando Série...'
+                    ) : (
+                      <>
+                        <Repeat size={14} />
+                        Confirmar Série ({recPreviewSummary.availableCount} reservas)
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* ================= FORMULÁRIO DE CRIAÇÃO (ÚNICO OU RECORRENTE - ETAPA 1) ================= */
+            <>
+              {/* Escolha da Sala (Seção 3.A) */}
+              <div>
+                <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                  Sala Selecionada
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  {(['Sala 1', 'Sala 2'] as RoomId[]).map(room => (
+                    <button
+                      key={room}
+                      type="button"
+                      onClick={() => setBookingRoom(room)}
+                      className={`py-3 px-4 rounded-2xl text-xs font-black uppercase tracking-wider border-2 transition-all flex items-center justify-center ${
+                        bookingRoom === room
+                          ? 'border-teal-600 bg-teal-50/50 text-teal-800'
+                          : 'border-gray-200 text-gray-500 hover:border-gray-300'
+                      }`}
+                    >
+                      <span>{room}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Data e Horário (Seção 3.B e 3.C) */}
+              {(() => {
+                const parsedBookingDate = bookingDate ? new Date(Number(bookingDate.split('-')[0]), Number(bookingDate.split('-')[1]) - 1, Number(bookingDate.split('-')[2])) : new Date();
+                const bookingDayOfWeek = parsedBookingDate.getDay();
+                const isSaturday = bookingDayOfWeek === 6;
+                const maxClosing = getClosingHourForDate(bookingDayOfWeek) || hoursEnd;
+                const availableHoursForDay = hours.filter(h => h < maxClosing);
+
+                return (
+                  <>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                          {isRecurringMode ? 'Data de Início da Série' : 'Data'}
+                        </label>
+                        <input
+                          type="date"
+                          value={bookingDate}
+                          onChange={e => {
+                            const newDateStr = e.target.value;
+                            setBookingDate(newDateStr);
+                            if (newDateStr) {
+                              const [y, m, d] = newDateStr.split('-').map(Number);
+                              const newDay = new Date(y, m - 1, d).getDay();
+                              const newMax = getClosingHourForDate(newDay);
+                              if (newMax > 0 && bookingStartHour >= newMax) {
+                                setBookingStartHour(hoursStart);
+                              }
+                              // Sincroniza dia da semana para recorrência
+                              if (newDay >= 1 && newDay <= 6 && recWeekdays.length <= 1) {
+                                setRecWeekdays([newDay]);
+                              }
+                            }
+                          }}
+                          className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                        />
+                        <span className="text-[10px] text-gray-400 font-medium mt-1 block">
+                          {isSaturday ? (
+                            <strong className="text-teal-700">Aos sábados o atendimento vai até as 14:00.</strong>
+                          ) : (
+                            'Atendimento de seg a sáb (salas fechadas aos domingos).'
+                          )}
+                        </span>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                          Tipo de Locação
+                        </label>
+                        <div className="grid grid-cols-2 gap-2">
                           <button
-                            key={p.id}
                             type="button"
-                            disabled={!isAvailable}
-                            onClick={() => {
-                              if (isAvailable) setBookingPeriodShift(p.id);
-                            }}
-                            className={`p-3.5 rounded-2xl border text-left flex flex-col justify-between transition-all ${
-                              !isAvailable
-                                ? 'bg-gray-100/70 border-gray-200 text-gray-400 opacity-60 cursor-not-allowed'
-                                : isSelected
-                                ? 'bg-teal-50 border-teal-600 text-teal-900 shadow-sm ring-2 ring-teal-500/20'
-                                : 'bg-white border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-50/50'
+                            onClick={() => setBookingType('HOURLY')}
+                            className={`py-2.5 px-3 rounded-xl text-[11px] font-black uppercase tracking-wider border transition-all ${
+                              bookingType === 'HOURLY'
+                                ? 'bg-teal-600 text-white border-teal-600 shadow-sm'
+                                : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
                             }`}
                           >
-                            <div className="flex items-center justify-between mb-2">
-                              <div className={`p-2 rounded-xl ${
-                                isSelected ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-500'
-                              }`}>
-                                {p.id === 'MORNING' ? (
-                                  <Sunrise size={18} />
-                                ) : p.id === 'AFTERNOON' ? (
-                                  <Sun size={18} />
-                                ) : p.id === 'NIGHT' ? (
-                                  <Moon size={18} />
-                                ) : (
-                                  <CalendarIcon size={18} />
-                                )}
-                              </div>
-                              <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
-                                isSelected ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-700'
-                              }`}>
-                                {isAvailable ? `R$ ${rate.toFixed(2)}` : 'Indisponível'}
-                              </span>
-                            </div>
-                            <div>
-                              <div className="font-black text-xs uppercase tracking-wide">
-                                {p.name}
-                              </div>
-                              <span className="text-[11px] font-bold text-gray-600 block mt-0.5">
-                                {conf.startHour.toString().padStart(2, '0')}:00 às {conf.endHour.toString().padStart(2, '0')}:00
-                              </span>
-                              <span className="text-[10px] text-gray-400 mt-0.5 block font-medium">
-                                {!isAvailable ? 'Fechado aos sábados' : `${conf.duration} horas de locação`}
-                              </span>
-                            </div>
+                            Por Hora
                           </button>
-                        );
-                      })}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBookingType('PERIOD');
+                              if (isSaturday && bookingPeriodShift === 'NIGHT') {
+                                setBookingPeriodShift('MORNING');
+                              }
+                            }}
+                            className={`py-2.5 px-3 rounded-xl text-[11px] font-black uppercase tracking-wider border transition-all ${
+                              bookingType === 'PERIOD'
+                                ? 'bg-teal-600 text-white border-teal-600 shadow-sm'
+                                : 'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
+                            }`}
+                          >
+                            Por Período (Turno)
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Parâmetros se for por hora */}
+                    {bookingType === 'HOURLY' ? (
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                            Horário Inicial
+                          </label>
+                          <select
+                            value={bookingStartHour >= maxClosing ? hoursStart : bookingStartHour}
+                            onChange={e => setBookingStartHour(Number(e.target.value))}
+                            className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                          >
+                            {availableHoursForDay.map(h => (
+                              <option key={h} value={h}>
+                                {h.toString().padStart(2, '0')}:00
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                            Duração
+                          </label>
+                          <select
+                            value={bookingDuration}
+                            onChange={e => setBookingDuration(Number(e.target.value))}
+                            className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                          >
+                            {[1, 2, 3, 4, 5, 6, 7, 8].filter(d => bookingStartHour + d <= maxClosing).map(d => (
+                              <option key={d} value={d}>
+                                {d} {d === 1 ? 'hora' : 'horas'} (até {bookingStartHour + d}:00)
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <label className="block text-xs font-black text-gray-700 uppercase tracking-wider">
+                          Selecione o Turno Desejado
+                        </label>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                          {BOOKING_PERIODS.map(p => {
+                            const conf = getPeriodConfig(p.id, bookingDate);
+                            const isSelected = bookingPeriodShift === p.id;
+                            const isAvailable = conf.isAvailableOnDate;
+                            const roomObj = rooms.find(r => r.id === bookingRoom);
+                            let rate = 0;
+                            if (p.id === 'MORNING') rate = roomObj?.morningRate || INITIAL_PERIOD_RATES.MORNING;
+                            else if (p.id === 'AFTERNOON') {
+                              const base = roomObj?.afternoonRate || INITIAL_PERIOD_RATES.AFTERNOON;
+                              rate = isSaturday ? Number((base * (2 / 6)).toFixed(2)) : base;
+                            } else if (p.id === 'NIGHT') {
+                              rate = roomObj?.nightRate || INITIAL_PERIOD_RATES.NIGHT;
+                            } else {
+                              const base = roomObj?.dailyRate || roomObj?.fullDayRate || INITIAL_PERIOD_RATES.FULL_DAY;
+                              rate = isSaturday ? Number((base * (7 / 15)).toFixed(2)) : base;
+                            }
+
+                            return (
+                              <button
+                                key={p.id}
+                                type="button"
+                                disabled={!isAvailable}
+                                onClick={() => {
+                                  if (isAvailable) setBookingPeriodShift(p.id);
+                                }}
+                                className={`p-3.5 rounded-2xl border text-left flex flex-col justify-between transition-all ${
+                                  !isAvailable
+                                    ? 'bg-gray-100/70 border-gray-200 text-gray-400 opacity-60 cursor-not-allowed'
+                                    : isSelected
+                                    ? 'bg-teal-50 border-teal-600 text-teal-900 shadow-sm ring-2 ring-teal-500/20'
+                                    : 'bg-white border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-50/50'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between mb-2">
+                                  <div className={`p-2 rounded-xl ${
+                                    isSelected ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-500'
+                                  }`}>
+                                    {p.id === 'MORNING' ? (
+                                      <Sunrise size={18} />
+                                    ) : p.id === 'AFTERNOON' ? (
+                                      <Sun size={18} />
+                                    ) : p.id === 'NIGHT' ? (
+                                      <Moon size={18} />
+                                    ) : (
+                                      <CalendarIcon size={18} />
+                                    )}
+                                  </div>
+                                  <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
+                                    isSelected ? 'bg-teal-600 text-white' : 'bg-gray-100 text-gray-700'
+                                  }`}>
+                                    {isAvailable ? `R$ ${rate.toFixed(2)}` : 'Indisponível'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <div className="font-black text-xs uppercase tracking-wide">
+                                    {p.name}
+                                  </div>
+                                  <span className="text-[11px] font-bold text-gray-600 block mt-0.5">
+                                    {conf.startHour.toString().padStart(2, '0')}:00 às {conf.endHour.toString().padStart(2, '0')}:00
+                                  </span>
+                                  <span className="text-[10px] text-gray-400 mt-0.5 block font-medium">
+                                    {!isAvailable ? 'Fechado aos sábados' : `${conf.duration} horas de locação`}
+                                  </span>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+
+              {/* ================= CAMPOS EXCLUSIVOS DE RECORRÊNCIA (Seção 3.D, 3.E, 3.F) ================= */}
+              {isRecurringMode && (
+                <div className="bg-gray-50 border border-gray-200/80 rounded-2xl p-4 space-y-4">
+                  {/* Frequência (Seção 3.D) */}
+                  <div>
+                    <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                      Frequência de Repetição
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: 'WEEKLY' as RecurrenceFrequency, label: 'Semanal', sub: 'A cada semana' },
+                        { id: 'BIWEEKLY' as RecurrenceFrequency, label: 'Quinzenal', sub: 'A cada 2 semanas' },
+                        { id: 'MONTHLY' as RecurrenceFrequency, label: 'Mensal', sub: 'Mesmo dia do mês' }
+                      ].map(f => (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => setRecFrequency(f.id)}
+                          className={`p-2.5 rounded-xl border text-center transition-all ${
+                            recFrequency === f.id
+                              ? 'bg-teal-600 text-white border-teal-600 shadow-sm'
+                              : 'bg-white text-gray-700 border-gray-200 hover:border-gray-300'
+                          }`}
+                        >
+                          <span className="text-xs font-black uppercase tracking-wider block">
+                            {f.label}
+                          </span>
+                          <span className={`text-[9px] block ${recFrequency === f.id ? 'text-teal-100' : 'text-gray-400'}`}>
+                            {f.sub}
+                          </span>
+                        </button>
+                      ))}
                     </div>
                   </div>
-                )}
-              </>
-            );
-          })()}
 
-          {/* Seleção de Paciente */}
-          <div>
-            <div className="flex justify-between items-center mb-1.5">
-              <label className="block text-xs font-black text-gray-700 uppercase tracking-wider">
-                Cliente / Paciente
-              </label>
-              {onOpenClients && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsBookingModalOpen(false);
-                    onOpenClients();
-                  }}
-                  className="text-[11px] font-black text-teal-600 hover:underline uppercase tracking-wider"
-                >
-                  + Cadastrar Novo Paciente
-                </button>
-              )}
-            </div>
+                  {/* Dias da Semana (Seção 3.E) */}
+                  {recFrequency !== 'MONTHLY' && (
+                    <div>
+                      <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                        Dias da Semana (Permite múltiplos dias)
+                      </label>
+                      <div className="grid grid-cols-6 gap-1.5">
+                        {[
+                          { id: 1, label: 'Seg' },
+                          { id: 2, label: 'Ter' },
+                          { id: 3, label: 'Qua' },
+                          { id: 4, label: 'Qui' },
+                          { id: 5, label: 'Sex' },
+                          { id: 6, label: 'Sáb' }
+                        ].map(d => {
+                          const isSel = recWeekdays.includes(d.id);
+                          return (
+                            <button
+                              key={d.id}
+                              type="button"
+                              onClick={() => {
+                                setRecWeekdays(prev =>
+                                  prev.includes(d.id)
+                                    ? (prev.length > 1 ? prev.filter(x => x !== d.id) : prev)
+                                    : [...prev, d.id].sort()
+                                );
+                              }}
+                              className={`py-2 rounded-xl text-xs font-black transition-all ${
+                                isSel
+                                  ? 'bg-teal-600 text-white shadow-sm ring-2 ring-teal-500/20'
+                                  : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-100'
+                              }`}
+                            >
+                              {d.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <span className="text-[10px] text-gray-400 font-medium mt-1 block">
+                        {recFrequency === 'BIWEEKLY'
+                          ? 'A frequência quinzenal preserva rigorosamente a alternância a cada 2 semanas.'
+                          : 'As salas não funcionam aos domingos.'}
+                      </span>
+                    </div>
+                  )}
 
-            <select
-              value={selectedClientId}
-              onChange={e => setSelectedClientId(e.target.value)}
-              className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
-            >
-              <option value="">-- Atendimento sem paciente vinculado --</option>
-              {myClients.map(c => (
-                <option key={c.id} value={c.id}>
-                  {c.name} {c.cpf ? `(CPF: ${c.cpf})` : ''}
-                </option>
-              ))}
-            </select>
-          </div>
+                  {/* Encerramento (Seção 3.F) */}
+                  <div>
+                    <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
+                      Critério de Encerramento
+                    </label>
+                    <div className="grid grid-cols-2 gap-2 mb-2.5">
+                      <button
+                        type="button"
+                        onClick={() => setRecEndType('OCCURRENCES')}
+                        className={`py-2 px-3 rounded-xl text-[11px] font-black uppercase tracking-wider border transition-all ${
+                          recEndType === 'OCCURRENCES'
+                            ? 'bg-teal-600 text-white border-teal-600 shadow-sm'
+                            : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                        }`}
+                      >
+                        Qtd. de Ocorrências
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRecEndType('UNTIL_DATE')}
+                        className={`py-2 px-3 rounded-xl text-[11px] font-black uppercase tracking-wider border transition-all ${
+                          recEndType === 'UNTIL_DATE'
+                            ? 'bg-teal-600 text-white border-teal-600 shadow-sm'
+                            : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                        }`}
+                      >
+                        Até Data Específica
+                      </button>
+                    </div>
 
-          {/* Feedback de Conflito em Tempo Real */}
-          <div className="pt-1">
-            {isCheckingConflict ? (
-              <div className="text-xs text-gray-400 flex items-center gap-2">
-                <div className="w-3.5 h-3.5 border-2 border-teal-600 border-t-transparent rounded-full animate-spin"></div>
-                <span>Verificando disponibilidade da sala...</span>
-              </div>
-            ) : conflictStatus.hasConflict ? (
-              <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl text-red-700 text-xs flex items-start gap-2.5 animate-fade-in">
-                <AlertTriangle size={18} className="flex-shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-black uppercase tracking-wider block">Horário Indisponível</span>
-                  <span className="text-[11px] leading-relaxed">{conflictStatus.reason}</span>
+                    {recEndType === 'OCCURRENCES' ? (
+                      <div className="flex items-center gap-2">
+                        {[4, 8, 12, 16].map(num => (
+                          <button
+                            key={num}
+                            type="button"
+                            onClick={() => setRecOccurrencesCount(num)}
+                            className={`flex-1 py-1.5 rounded-lg text-xs font-black transition-all ${
+                              recOccurrencesCount === num
+                                ? 'bg-teal-600 text-white'
+                                : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-100'
+                            }`}
+                          >
+                            {num}x
+                          </button>
+                        ))}
+                        <input
+                          type="number"
+                          min="1"
+                          max="52"
+                          value={recOccurrencesCount}
+                          onChange={e => setRecOccurrencesCount(Math.max(1, Number(e.target.value)))}
+                          className="w-20 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-center"
+                          title="Quantidade de ocorrências"
+                        />
+                      </div>
+                    ) : (
+                      <input
+                        type="date"
+                        value={recEndDate}
+                        min={bookingDate}
+                        onChange={e => setRecEndDate(e.target.value)}
+                        className="w-full px-4 py-2 bg-white border border-gray-200 rounded-xl text-xs font-semibold text-gray-800"
+                      />
+                    )}
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-800 text-xs flex items-center gap-2 animate-fade-in">
-                <CheckCircle size={16} className="text-emerald-600 flex-shrink-0" />
-                <span className="font-black uppercase tracking-wider text-[11px]">
-                  ✓ Sala disponível. Confirme sua locação.
-                </span>
-              </div>
-            )}
-          </div>
+              )}
 
-          {/* Resumo de Valor */}
-          <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100 flex justify-between items-center">
-            <div>
-              <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block">
-                Valor Total da Locação
-              </span>
-              <span className="text-xs text-gray-500">
-                {(() => {
-                  const bDay = bookingDate ? new Date(Number(bookingDate.split('-')[0]), Number(bookingDate.split('-')[1]) - 1, Number(bookingDate.split('-')[2])).getDay() : 1;
-                  const closeH = getClosingHourForDate(bDay) || hoursEnd;
-                  const periodHours = closeH - hoursStart;
-                  const currentRoom = rooms.find(r => r.id === bookingRoom);
-                  const roomHourlyRate = currentRoom?.hourlyRate || 40;
-                  return bookingType === 'PERIOD' 
-                    ? `Tarifa do Período (${periodHours}h)` 
-                    : `${bookingDuration}h × R$ ${roomHourlyRate.toFixed(2)}/h`;
-                })()}
-              </span>
-            </div>
-            <div className="text-right">
-              <span className="text-2xl font-black text-teal-600">
-                R$ {modalCalculatedPrice.toFixed(2)}
-              </span>
-              <span className="block text-[9px] text-gray-400 font-bold uppercase tracking-wider">
-                Faturamento mensal
-              </span>
-            </div>
-          </div>
+              {/* Seleção de Paciente */}
+              <div>
+                <div className="flex justify-between items-center mb-1.5">
+                  <label className="block text-xs font-black text-gray-700 uppercase tracking-wider">
+                    Cliente / Paciente
+                  </label>
+                  {onOpenClients && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsBookingModalOpen(false);
+                        onOpenClients();
+                      }}
+                      className="text-[11px] font-black text-teal-600 hover:underline uppercase tracking-wider"
+                    >
+                      + Cadastrar Novo Paciente
+                    </button>
+                  )}
+                </div>
 
-          {/* Botões de Ação */}
-          <div className="pt-2 flex justify-end gap-3">
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => setIsBookingModalOpen(false)}
-            >
-              Cancelar
-            </Button>
-            <Button
-              type="button"
-              disabled={conflictStatus.hasConflict || isSubmitting || isCheckingConflict}
-              onClick={handleConfirmBooking}
-              className="flex items-center gap-2"
-            >
-              {isSubmitting ? 'Confirmando...' : 'Confirmar Locação'}
-            </Button>
-          </div>
+                <select
+                  value={selectedClientId}
+                  onChange={e => setSelectedClientId(e.target.value)}
+                  className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                >
+                  <option value="">-- Atendimento sem paciente vinculado --</option>
+                  {myClients.map(c => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} {c.cpf ? `(CPF: ${c.cpf})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Feedback de Conflito em Tempo Real (Apenas para agendamento único) */}
+              {!isRecurringMode && (
+                <div className="pt-1">
+                  {isCheckingConflict ? (
+                    <div className="text-xs text-gray-400 flex items-center gap-2">
+                      <div className="w-3.5 h-3.5 border-2 border-teal-600 border-t-transparent rounded-full animate-spin"></div>
+                      <span>Verificando disponibilidade da sala...</span>
+                    </div>
+                  ) : conflictStatus.hasConflict ? (
+                    <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl text-red-700 text-xs flex items-start gap-2.5 animate-fade-in">
+                      <AlertTriangle size={18} className="shrink-0 mt-0.5" />
+                      <div>
+                        <span className="font-black uppercase tracking-wider block">Horário Indisponível</span>
+                        <span className="text-[11px] leading-relaxed">{conflictStatus.reason}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-800 text-xs flex items-center gap-2 animate-fade-in">
+                      <CheckCircle size={16} className="text-emerald-600 shrink-0" />
+                      <span className="font-black uppercase tracking-wider text-[11px]">
+                        ✓ Sala disponível. Confirme sua locação.
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Resumo de Valor (Apenas para agendamento único) */}
+              {!isRecurringMode && (
+                <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100 flex justify-between items-center">
+                  <div>
+                    <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest block">
+                      Valor Total da Locação
+                    </span>
+                    <span className="text-xs text-gray-500">
+                      {(() => {
+                        const bDay = bookingDate ? new Date(Number(bookingDate.split('-')[0]), Number(bookingDate.split('-')[1]) - 1, Number(bookingDate.split('-')[2])).getDay() : 1;
+                        const closeH = getClosingHourForDate(bDay) || hoursEnd;
+                        const periodHours = closeH - hoursStart;
+                        const currentRoom = rooms.find(r => r.id === bookingRoom);
+                        const roomHourlyRate = currentRoom?.hourlyRate || 40;
+                        return bookingType === 'PERIOD' 
+                          ? `Tarifa do Período (${periodHours}h)` 
+                          : `${bookingDuration}h × R$ ${roomHourlyRate.toFixed(2)}/h`;
+                      })()}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-2xl font-black text-teal-600">
+                      R$ {modalCalculatedPrice.toFixed(2)}
+                    </span>
+                    <span className="block text-[9px] text-gray-400 font-bold uppercase tracking-wider">
+                      Faturamento mensal
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Botões de Ação */}
+              <div className="pt-2 flex justify-end gap-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setIsBookingModalOpen(false)}
+                >
+                  Cancelar
+                </Button>
+                {isRecurringMode ? (
+                  <Button
+                    type="button"
+                    disabled={isLoadingRecPreview}
+                    onClick={handleGenerateRecSummary}
+                    className="flex items-center gap-2"
+                  >
+                    {isLoadingRecPreview ? (
+                      'Calculando Conflitos...'
+                    ) : (
+                      <>
+                        <span>Visualizar Resumo da Série</span>
+                        <ChevronRight size={16} />
+                      </>
+                    )}
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    disabled={conflictStatus.hasConflict || isSubmitting || isCheckingConflict}
+                    onClick={handleConfirmBooking}
+                    className="flex items-center gap-2"
+                  >
+                    {isSubmitting ? 'Confirmando...' : 'Confirmar Locação'}
+                  </Button>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </Modal>
 
-      {/* ================= MODAL DETALHES / CANCELAMENTO (Seção 4, 23) ================= */}
+      {/* ================= MODAL DETALHES / GERENCIAMENTO (Seção 4, 9, 23) ================= */}
       <Modal
         isOpen={isDetailsModalOpen}
-        onClose={() => setIsDetailsModalOpen(false)}
+        onClose={() => {
+          setIsDetailsModalOpen(false);
+          setConfirmCancelFuture(false);
+        }}
         title="Detalhes da Locação"
       >
         {selectedBooking && (
@@ -1327,6 +2004,33 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                 {format(parseISO(selectedBooking.date), "EEEE, d 'de' MMMM 'de' yyyy", { locale: ptBR })}
               </p>
             </div>
+
+            {/* Painel Especial de Agendamento Recorrente (Seção 7 e 8) */}
+            {selectedBooking.recurrenceId && (
+              <div className="bg-teal-50/70 border border-teal-200/80 rounded-2xl p-4 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Repeat size={16} className="text-teal-700" />
+                    <span className="text-xs font-black uppercase tracking-wider text-teal-900">
+                      Agendamento Recorrente
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-teal-200/70 text-teal-900">
+                    Ocorrência #{selectedBooking.recurrenceIndex || 1} de {selectedBooking.recurrenceTotal || 1}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-xs text-teal-950">
+                  <span>Regra da Série: <strong className="font-bold">{selectedBooking.recurrenceRule === 'WEEKLY' ? 'Semanal' : selectedBooking.recurrenceRule === 'BIWEEKLY' ? 'Quinzenal' : 'Mensal'}</strong></span>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenSeriesModal(selectedBooking.recurrenceId!)}
+                    className="font-black text-teal-700 underline hover:text-teal-900 flex items-center gap-1 uppercase text-[10px] tracking-wider"
+                  >
+                    <CalendarRange size={13} /> Consultar Toda a Série
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div className="space-y-3 text-xs text-gray-700 bg-gray-50 p-5 rounded-2xl border border-gray-100">
               <div className="flex justify-between py-1 border-b border-gray-200/60">
@@ -1372,35 +2076,196 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
 
             {!isAdmin && selectedBooking.userId === user.id && cancellationLimitHours > 0 && (
               <div className="bg-amber-50 border border-amber-100 rounded-xl p-2.5 text-[11px] text-amber-800 font-medium">
-                Política de exclusão/cancelamento: antecedência mínima de <strong>{cancellationLimitHours}h</strong> antes do horário agendado.
+                Política de cancelamento: antecedência mínima de <strong>{cancellationLimitHours}h</strong> antes do horário agendado.
               </div>
             )}
 
-            {/* Ações: Cancelamento ou Fechar */}
-            <div className="pt-2 flex justify-between items-center gap-3">
-              {(selectedBooking.userId === user.id || isAdmin) ? (
-                <Button
-                  variant="danger"
-                  disabled={isCancelling}
-                  onClick={handleCancelBooking}
-                  className="flex items-center gap-1.5"
-                >
-                  <Ban size={15} />
-                  {isCancelling ? 'Cancelando...' : 'Cancelar Locação'}
-                </Button>
-              ) : (
-                <div></div>
-              )}
+            {/* Confirmação de Cancelamento de Ocorrências Futuras (Seção 9) */}
+            {confirmCancelFuture && selectedBooking.recurrenceId && (
+              <div className="p-4 bg-red-50 border border-red-200 rounded-2xl text-red-900 text-xs space-y-3 animate-fade-in">
+                <div className="flex items-center gap-2 font-black uppercase tracking-wider text-red-800">
+                  <AlertTriangle size={16} /> Confirmar Cancelamento da Série
+                </div>
+                <p className="text-[11px] leading-relaxed">
+                  Esta ação irá cancelar <strong>esta ocorrência ({format(parseISO(selectedBooking.date), 'dd/MM/yyyy')}) e todas as ocorrências futuras</strong> desta série recorrente. Ocorrências passadas serão mantidas intactas no histórico.
+                </p>
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => setConfirmCancelFuture(false)}
+                  >
+                    Voltar
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    disabled={isCancellingSeries}
+                    onClick={handleCancelFutureOccurrences}
+                  >
+                    {isCancellingSeries ? 'Cancelando Futuras...' : 'Confirmar e Cancelar Futuras'}
+                  </Button>
+                </div>
+              </div>
+            )}
 
-              <Button
-                variant="secondary"
-                onClick={() => setIsDetailsModalOpen(false)}
-              >
-                Fechar
-              </Button>
-            </div>
+            {/* Ações: Cancelamento ou Fechar (Seção 9) */}
+            {!confirmCancelFuture && (
+              <div className="pt-2 flex flex-wrap justify-between items-center gap-2">
+                {(selectedBooking.userId === user.id || isAdmin) ? (
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="danger"
+                      disabled={isCancelling}
+                      onClick={handleCancelBooking}
+                      className="flex items-center gap-1.5 text-xs"
+                    >
+                      <Ban size={15} />
+                      {isCancelling ? 'Cancelando...' : 'Cancelar Apenas Esta'}
+                    </Button>
+
+                    {selectedBooking.recurrenceId && (
+                      <Button
+                        variant="secondary"
+                        onClick={() => setConfirmCancelFuture(true)}
+                        className="flex items-center gap-1.5 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
+                      >
+                        <RotateCcw size={14} />
+                        Cancelar Esta e Futuras
+                      </Button>
+                    )}
+                  </div>
+                ) : (
+                  <div></div>
+                )}
+
+                <Button
+                  variant="secondary"
+                  onClick={() => setIsDetailsModalOpen(false)}
+                >
+                  Fechar
+                </Button>
+              </div>
+            )}
           </div>
         )}
+      </Modal>
+
+      {/* ================= MODAL SÉRIE COMPLETA (Seção 9) ================= */}
+      <Modal
+        isOpen={isSeriesModalOpen}
+        onClose={() => setIsSeriesModalOpen(false)}
+        title="Gerenciamento da Série Recorrente"
+      >
+        <div className="space-y-5">
+          {isLoadingSeries ? (
+            <div className="py-12 flex flex-col items-center justify-center gap-3 text-gray-400">
+              <div className="w-6 h-6 border-2 border-teal-600 border-t-transparent rounded-full animate-spin"></div>
+              <span className="text-xs font-bold uppercase tracking-wider">Carregando dados da série...</span>
+            </div>
+          ) : (
+            <>
+              {/* Resumo da Série Carregada */}
+              {seriesBookings.length > 0 && (
+                <div className="bg-teal-50 border border-teal-200/80 rounded-2xl p-4">
+                  <div className="flex items-center justify-between pb-2 border-b border-teal-200/60 mb-2">
+                    <span className="text-xs font-black uppercase text-teal-900 flex items-center gap-2">
+                      <Repeat size={16} /> Série #{seriesBookings[0].recurrenceId?.slice(0, 8)}
+                    </span>
+                    <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-teal-200 text-teal-900">
+                      {seriesBookings[0].roomId}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs text-teal-950">
+                    <div>
+                      <span className="text-[10px] font-bold text-teal-700 uppercase block">Total:</span>
+                      <strong className="font-black">{seriesBookings.length} reservas</strong>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-teal-700 uppercase block">Ativas:</span>
+                      <strong className="font-black text-emerald-700">
+                        {seriesBookings.filter(b => b.paymentStatus !== 'CANCELLED').length}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-teal-700 uppercase block">Canceladas:</span>
+                      <strong className="font-black text-gray-500">
+                        {seriesBookings.filter(b => b.paymentStatus === 'CANCELLED').length}
+                      </strong>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-teal-700 uppercase block">Total Faturado:</span>
+                      <strong className="font-black text-teal-800">
+                        R$ {seriesBookings.filter(b => b.paymentStatus !== 'CANCELLED').reduce((s, b) => s + b.totalAmount, 0).toFixed(2)}
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Tabela de Ocorrências da Série */}
+              <div>
+                <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-2">
+                  Todas as Ocorrências da Série
+                </label>
+                <div className="max-h-72 overflow-y-auto space-y-1.5 custom-scrollbar pr-1">
+                  {seriesBookings.map((b, idx) => {
+                    const isCancelled = b.paymentStatus === 'CANCELLED';
+                    return (
+                      <div
+                        key={b.id}
+                        className={`p-3 rounded-xl border flex items-center justify-between gap-3 text-xs ${
+                          isCancelled
+                            ? 'bg-gray-50/70 border-gray-200 text-gray-400 opacity-70'
+                            : 'bg-white border-gray-200 text-gray-800 shadow-sm'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span className="text-[10px] font-black text-gray-400 w-6">
+                            #{idx + 1}
+                          </span>
+                          <div>
+                            <div className="font-black">
+                              {format(parseISO(b.date), "dd/MM/yyyy (EEEE)", { locale: ptBR })}
+                            </div>
+                            <span className="text-[11px] text-gray-500 block">
+                              {b.hour}:00 às {b.endTimeHour}:00 {b.clientName ? `• Paciente: ${b.clientName}` : ''}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="text-right shrink-0">
+                          <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-md block ${
+                            isCancelled
+                              ? 'bg-gray-100 text-gray-500'
+                              : b.paymentStatus === 'PAID'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-amber-100 text-amber-800'
+                          }`}>
+                            {isCancelled ? 'Cancelada' : b.paymentStatus === 'PAID' ? 'Pago' : 'Pendente'}
+                          </span>
+                          <span className="text-[11px] font-bold text-gray-700 mt-0.5 block">
+                            R$ {b.totalAmount.toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="pt-2 flex justify-end gap-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setIsSeriesModalOpen(false)}
+                >
+                  Fechar
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
       </Modal>
     </div>
   );

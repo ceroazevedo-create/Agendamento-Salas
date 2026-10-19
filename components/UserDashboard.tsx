@@ -16,7 +16,7 @@ import { getPasswordValidationMessage } from '../utils/passwordSecurity';
 import { 
   TrendingUp, Clock, DollarSign, AlertCircle, 
   CheckCircle2, Calendar as CalendarIcon, User as UserIcon, 
-  Search, Filter, Ban, FileText, Download, Lock, ShieldCheck, Phone
+  Search, Filter, Ban, FileText, Download, Lock, ShieldCheck, Phone, Repeat
 } from 'lucide-react';
 import { useToast } from './Toast';
 
@@ -561,7 +561,12 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                     filteredBookings.map(b => (
                       <tr key={b.id} className="hover:bg-gray-50/50 transition-colors">
                         <td className="py-4 px-6 font-black text-gray-900">
-                          {format(parseISO(b.date), 'dd/MM/yyyy')}
+                          <div className="flex items-center gap-1.5">
+                            {b.recurrenceId && (
+                              <Repeat size={12} className="text-teal-600 shrink-0" title={`Recorrente (${b.recurrenceIndex || 1}/${b.recurrenceTotal || 1})`} />
+                            )}
+                            <span>{format(parseISO(b.date), 'dd/MM/yyyy')}</span>
+                          </div>
                         </td>
                         <td className="py-4 px-6 font-bold text-teal-700">
                           {b.roomId}

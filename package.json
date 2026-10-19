@@ -9,7 +9,9 @@
     "build:cf": "vite build --base=/",
     "start": "node dist/server.cjs",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "esbuild test/recurringSeries.test.ts --bundle --platform=node --outfile=dist-test.cjs && node dist-test.cjs && rm -f dist-test.cjs",
+    "test:recurrence": "npm run test"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.48.1",

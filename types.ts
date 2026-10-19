@@ -77,6 +77,45 @@ export interface Booking {
   paidAt?: string;
   paidNotes?: string;
   paidByAdmin?: string;
+  recurrenceId?: string; // ID único da série recorrente
+  recurrenceRule?: RecurrenceFrequency; // 'WEEKLY' | 'BIWEEKLY' | 'MONTHLY'
+  recurrenceIndex?: number; // Ex: 1 (ocorrência 1 de N)
+  recurrenceTotal?: number; // Total de ocorrências criadas na série
+}
+
+export type RecurrenceFrequency = 'WEEKLY' | 'BIWEEKLY' | 'MONTHLY';
+export type RecurrenceEndType = 'UNTIL_DATE' | 'OCCURRENCES';
+
+export interface RecurrenceConfig {
+  frequency: RecurrenceFrequency;
+  weekdays: number[]; // 1 = Seg, 2 = Ter, 3 = Qua, 4 = Qui, 5 = Sex, 6 = Sáb
+  startDate: string; // YYYY-MM-DD
+  endType: RecurrenceEndType;
+  endDate?: string; // YYYY-MM-DD
+  occurrencesCount?: number;
+}
+
+export interface RecurrenceOccurrencePreview {
+  date: string;
+  dayOfWeek: number;
+  startHour: number;
+  endHour: number;
+  hasConflict: boolean;
+  conflictReason?: string;
+  price: number;
+}
+
+export interface RecurrencePreviewSummary {
+  roomId: RoomId;
+  frequency: RecurrenceFrequency;
+  weekdays: number[];
+  startDate: string;
+  endDate?: string;
+  totalExpected: number;
+  availableCount: number;
+  conflictCount: number;
+  occurrences: RecurrenceOccurrencePreview[];
+  totalEstimatedAmount: number;
 }
 
 export interface BlockedSlot {

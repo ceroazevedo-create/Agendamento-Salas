@@ -20,8 +20,8 @@ declare global {
 const defaultUrl = 'https://gqpavuqopukyfeyqyrxc.supabase.co';
 const defaultAnonKey = 'sb_publishable_idoSyVhNDWy33hjn4xCUpw_wjpcB8CS';
 
-const envUrl = import.meta.env.VITE_SUPABASE_URL || defaultUrl;
-const envAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || defaultAnonKey;
+const envUrl = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_URL) || (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_URL) || defaultUrl;
+const envAnonKey = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_ANON_KEY) || (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_ANON_KEY) || defaultAnonKey;
 
 // Funções para sanitizar URL e Chave do Supabase
 function sanitizeUrl(url?: string): string | null {

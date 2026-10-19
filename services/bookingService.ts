@@ -1,4 +1,4 @@
-import { Booking, RoomId, BookingType, PaymentStatus, BlockedSlot, SystemConfig, Room, PeriodShift } from '../types';
+import { Booking, RoomId, BookingType, PaymentStatus, BlockedSlot, SystemConfig, Room, PeriodShift, RecurrenceFrequency } from '../types';
 import { 
   getStoredBookings, saveStoredBookings, 
   getStoredBlockedSlots, saveStoredBlockedSlots, 
@@ -67,6 +67,22 @@ function mapDbBookingToBooking(b: any, profilesMap?: Map<string, any>): Booking 
 
   const paymentStatus: PaymentStatus = (b.payment_status || (b.status === 'cancelled' ? 'CANCELLED' : 'PENDING')) as PaymentStatus;
 
+  // Extração segura de dados de série recorrente (colunas nativas ou fallback em notes)
+  let recurrenceId: string | undefined = b.recurrence_id || b.recurrenceId || undefined;
+  let recurrenceRule: RecurrenceFrequency | undefined = (b.recurrence_rule || b.recurrenceRule || undefined) as RecurrenceFrequency | undefined;
+  let recurrenceIndex: number | undefined = b.recurrence_index !== undefined ? Number(b.recurrence_index) : (b.recurrenceIndex !== undefined ? Number(b.recurrenceIndex) : undefined);
+  let recurrenceTotal: number | undefined = b.recurrence_total !== undefined ? Number(b.recurrence_total) : (b.recurrenceTotal !== undefined ? Number(b.recurrenceTotal) : undefined);
+
+  if (!recurrenceId && notesText.includes('[SERIES:')) {
+    const match = notesText.match(/\[SERIES:([a-zA-Z0-9_-]+):(\d+)\/(\d+):([A-Z]+)\]/);
+    if (match) {
+      recurrenceId = match[1];
+      recurrenceIndex = Number(match[2]);
+      recurrenceTotal = Number(match[3]);
+      recurrenceRule = match[4] as RecurrenceFrequency;
+    }
+  }
+
   return {
     id: String(b.id),
     userId: uid,
@@ -89,7 +105,11 @@ function mapDbBookingToBooking(b: any, profilesMap?: Map<string, any>): Booking 
     notes: b.notes || undefined,
     paidAt: b.paid_at || undefined,
     paidNotes: b.paid_notes || undefined,
-    paidByAdmin: b.paid_by_admin || undefined
+    paidByAdmin: b.paid_by_admin || undefined,
+    recurrenceId,
+    recurrenceRule,
+    recurrenceIndex,
+    recurrenceTotal
   };
 }
 
@@ -223,6 +243,32 @@ export const bookingService = {
     }
 
     return localActive;
+  },
+
+  // Recupera reservas específicas diretamente por uma lista de IDs confirmados
+  getBookingsByIds: async (ids: string[]): Promise<Booking[]> => {
+    if (!ids || ids.length === 0) return [];
+    if (isSupabaseConfigured) {
+      try {
+        const [bookRes, profRes] = await Promise.all([
+          supabase.from('bookings').select('*').in('id', ids),
+          supabase.from('profiles').select('*')
+        ]);
+
+        if (bookRes.data && Array.isArray(bookRes.data)) {
+          const profilesMap = new Map<string, any>();
+          if (profRes.data) {
+            profRes.data.forEach((p: any) => profilesMap.set(p.id, p));
+          }
+          return bookRes.data.map((b: any) => mapDbBookingToBooking(b, profilesMap));
+        }
+      } catch (err) {
+        console.warn('Erro ao carregar reservas por IDs do Supabase:', err);
+      }
+    }
+
+    const localBookings = getStoredBookings();
+    return localBookings.filter(b => ids.includes(b.id));
   },
 
   // Retorna inclusive os cancelados se necessário para auditoria
@@ -447,6 +493,10 @@ export const bookingService = {
     periodShift?: PeriodShift;
     periodName?: string;
     notes?: string;
+    recurrenceId?: string;
+    recurrenceRule?: RecurrenceFrequency;
+    recurrenceIndex?: number;
+    recurrenceTotal?: number;
   }): Promise<Booking> => {
     let hourlyRate = 40.0;
     let periodRate = 350.0;
@@ -514,12 +564,12 @@ export const bookingService = {
         totalAmount = morningRate;
       } else if (periodShift === 'AFTERNOON') {
         const isSat = getClosingHourForDate(params.date) === SATURDAY_HOURS_END;
-        totalAmount = isSat ? Math.round(afternoonRate * (2 / 6)) : afternoonRate;
+        totalAmount = isSat ? Number((afternoonRate * (2 / 6)).toFixed(2)) : afternoonRate;
       } else if (periodShift === 'NIGHT') {
         totalAmount = nightRate;
       } else if (periodShift === 'FULL_DAY') {
         const isSat = getClosingHourForDate(params.date) === SATURDAY_HOURS_END;
-        totalAmount = isSat ? Math.round(periodRate * (7 / 15)) : periodRate;
+        totalAmount = isSat ? Number((periodRate * (7 / 15)).toFixed(2)) : periodRate;
       } else {
         totalAmount = periodRate;
       }
@@ -528,7 +578,7 @@ export const bookingService = {
     }
 
     // 3. Persistência no Supabase e Local
-    let createdBookingId = 'bk-' + Date.now();
+    let createdBookingId = 'bk-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7);
     let syncedToSupabase = false;
 
     if (isSupabaseConfigured) {
@@ -551,11 +601,16 @@ export const bookingService = {
         const clientId: string | null = isValidUUID(params.clientId) ? (params.clientId as string) : null;
 
         if (professionalId) {
-          const notesWithMeta = isPeriod 
-            ? `[PERIOD:${periodShift}] [Turno: ${periodName}] ${params.notes || ''}`.trim()
-            : (params.notes || null);
+          let notesWithMeta = params.notes || '';
+          if (isPeriod) {
+            notesWithMeta = `[PERIOD:${periodShift}] [Turno: ${periodName}] ${notesWithMeta}`.trim();
+          }
+          if (params.recurrenceId) {
+            notesWithMeta = `[SERIES:${params.recurrenceId}:${params.recurrenceIndex || 1}/${params.recurrenceTotal || 1}:${params.recurrenceRule || 'WEEKLY'}] ${notesWithMeta}`.trim();
+          }
+          const finalNotes = notesWithMeta ? notesWithMeta : null;
 
-          // Tentativa 1: Inserção com colunas completas incluindo period_shift e period_name
+          // Tentativa 1: Inserção com colunas completas incluindo period e recurrence
           const fullPayload: any = {
             professional_id: professionalId,
             client_id: clientId,
@@ -570,37 +625,58 @@ export const bookingService = {
             total_amount: totalAmount,
             payment_status: 'PENDING',
             status: 'confirmed',
-            notes: notesWithMeta,
+            notes: finalNotes,
             period_shift: isPeriod ? periodShift : null,
-            period_name: isPeriod ? periodName : null
+            period_name: isPeriod ? periodName : null,
+            recurrence_id: isValidUUID(params.recurrenceId) ? params.recurrenceId : null,
+            recurrence_rule: params.recurrenceRule || null,
+            recurrence_index: params.recurrenceIndex || null,
+            recurrence_total: params.recurrenceTotal || null
           };
 
-          const { data: createdWithPeriod, error: periodErr } = await supabase
+          const { data: createdWithFull, error: fullErr } = await supabase
             .from('bookings')
             .insert(fullPayload)
             .select()
             .maybeSingle();
 
-          if (!periodErr && createdWithPeriod) {
-            createdBookingId = String(createdWithPeriod.id);
+          if (!fullErr && createdWithFull) {
+            createdBookingId = String(createdWithFull.id);
             syncedToSupabase = true;
           } else {
-            // Se falhar devido à ausência das colunas period_shift/period_name na tabela remota, tenta sem elas
+            // Se falhar devido à ausência das colunas recurrence na tabela remota, tenta sem elas
             const stdPayload = { ...fullPayload };
-            delete stdPayload.period_shift;
-            delete stdPayload.period_name;
+            delete stdPayload.recurrence_id;
+            delete stdPayload.recurrence_rule;
+            delete stdPayload.recurrence_index;
+            delete stdPayload.recurrence_total;
 
-            const { data: createdStd, error: stdErr } = await supabase
+            const { data: createdWithPeriod, error: periodErr } = await supabase
               .from('bookings')
               .insert(stdPayload)
               .select()
               .maybeSingle();
 
-            if (!stdErr && createdStd) {
-              createdBookingId = String(createdStd.id);
+            if (!periodErr && createdWithPeriod) {
+              createdBookingId = String(createdWithPeriod.id);
               syncedToSupabase = true;
             } else {
-              console.warn('Aviso ao inserir no Supabase (reserva preservada localmente):', stdErr || periodErr);
+              // Se falhar também devido a period_shift/period_name
+              delete stdPayload.period_shift;
+              delete stdPayload.period_name;
+
+              const { data: createdStd, error: stdErr } = await supabase
+                .from('bookings')
+                .insert(stdPayload)
+                .select()
+                .maybeSingle();
+
+              if (!stdErr && createdStd) {
+                createdBookingId = String(createdStd.id);
+                syncedToSupabase = true;
+              } else {
+                console.warn('Aviso ao inserir no Supabase (reserva preservada localmente):', stdErr || periodErr || fullErr);
+              }
             }
           }
         }
@@ -610,8 +686,8 @@ export const bookingService = {
             await supabase.from('audit_logs').insert({
               user_id: professionalId,
               user_name: params.userName,
-              action: 'Nova Reserva',
-              details: `Locação criada: ${params.roomId}, ${params.date} das ${startHour}:00 às ${endHour}:00 (${isPeriod ? `Período da ${periodName}` : `${duration}h`}) (Total: R$ ${totalAmount.toFixed(2)})`
+              action: params.recurrenceId ? 'Nova Reserva Recorrente' : 'Nova Reserva',
+              details: `Locação criada: ${params.roomId}, ${params.date} das ${startHour}:00 às ${endHour}:00 (${isPeriod ? `Período da ${periodName}` : `${duration}h`}) (Total: R$ ${totalAmount.toFixed(2)})${params.recurrenceId ? ` [Série ${params.recurrenceIndex}/${params.recurrenceTotal}]` : ''}`
             });
           } catch {}
         }
@@ -639,7 +715,11 @@ export const bookingService = {
       totalAmount,
       paymentStatus: 'PENDING',
       createdAt: new Date().toISOString(),
-      notes: params.notes
+      notes: params.notes,
+      recurrenceId: params.recurrenceId,
+      recurrenceRule: params.recurrenceRule,
+      recurrenceIndex: params.recurrenceIndex,
+      recurrenceTotal: params.recurrenceTotal
     };
 
     const current = getStoredBookings();
@@ -1314,6 +1394,13 @@ export const bookingService = {
       return !(matchRoom && matchDate && matchHour);
     });
     saveStoredBookings(filtered);
+  },
+
+  getSeriesBookings: async (seriesId: string): Promise<Booking[]> => {
+    const all = await bookingService.getAllBookings();
+    return all
+      .filter(b => b.recurrenceId === seriesId)
+      .sort((a, b) => a.date.localeCompare(b.date) || a.hour - b.hour);
   }
 };
 
