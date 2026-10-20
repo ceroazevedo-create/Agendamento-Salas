@@ -10,7 +10,7 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "esbuild test/recurringSeries.test.ts --bundle --platform=node --outfile=dist-test.cjs && node dist-test.cjs && rm -f dist-test.cjs",
+    "test": "esbuild test/recurringSeries.test.ts --bundle --platform=node --outfile=dist-test.cjs && node dist-test.cjs && node -e \"require('fs').rmSync('dist-test.cjs', {force:true})\"",
     "test:recurrence": "npm run test"
   },
   "dependencies": {
@@ -18,13 +18,16 @@
     "@types/express": "^5.0.6",
     "date-fns": "^4.1.0",
     "express": "^5.2.1",
-    "jspdf": "^2.5.1",
-    "jspdf-autotable": "^3.8.2",
+    "jspdf": "4.2.1",
+    "jspdf-autotable": "5.0.9",
     "lucide-react": "^0.559.0",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "tsx": "^4.23.13",
     "uuid": "^13.0.0"
+  },
+  "overrides": {
+    "@supabase/auth-js": "2.70.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
