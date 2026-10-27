@@ -227,8 +227,8 @@ BEGIN
     WHERE room_id = NEW.room_id
       AND booking_date = NEW.booking_date
       AND id <> COALESCE(NEW.id, '00000000-0000-0000-0000-000000000000'::uuid)
-      AND payment_status <> 'CANCELLED'
-      AND status <> 'cancelled'
+      AND payment_status IS DISTINCT FROM 'CANCELLED'
+      AND status IS DISTINCT FROM 'cancelled'
       AND (GREATEST(start_time, NEW.start_time) < LEAST(end_time, NEW.end_time))
   ) THEN
     RAISE EXCEPTION 'Este horário já está reservado nesta sala.' USING ERRCODE = '23P01';
