@@ -49,6 +49,19 @@ BEGIN
 END;
 $$;
 
+-- Compatibilidade com a versão da RPC já instalada em alguns ambientes,
+-- que chama locapsico_lock_room_dates(JSONB) pelo nome legado.
+CREATE OR REPLACE FUNCTION public.locapsico_lock_room_dates(p_items JSONB)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $
+BEGIN
+  PERFORM public.acquire_room_date_locks(p_items);
+END;
+$;
+
 -- Função auxiliar individual para retrocompatibilidade
 CREATE OR REPLACE FUNCTION public.acquire_room_date_lock(p_room_id TEXT, p_date DATE)
 RETURNS VOID
@@ -119,8 +132,8 @@ BEGIN
     SELECT 1 FROM public.bookings
     WHERE (NEW.room_id = 'ALL' OR room_id = NEW.room_id)
       AND booking_date = NEW.blocked_date
-      AND payment_status <> 'CANCELLED'
-      AND status <> 'cancelled'
+      AND payment_status IS DISTINCT FROM 'CANCELLED'
+      AND status IS DISTINCT FROM 'cancelled'
       AND GREATEST(start_time, NEW.start_time) < LEAST(end_time, NEW.end_time)
   ) THEN
     RAISE EXCEPTION 'Não é possível bloquear o horário: existem agendamentos ativos confirmados neste período.' USING ERRCODE = '23P01';
@@ -186,7 +199,7 @@ BEGIN
   END IF;
 
   -- 5. Aquisição determinística de locks consultivos na mesma ordem global canônica
-  IF TG_OP = 'UPDATE' AND (OLD.payment_status <> 'CANCELLED' AND OLD.status <> 'cancelled') 
+  IF TG_OP = 'UPDATE' AND (OLD.payment_status IS DISTINCT FROM 'CANCELLED' AND OLD.status IS DISTINCT FROM 'cancelled') 
      AND (OLD.room_id <> NEW.room_id OR OLD.booking_date <> NEW.booking_date) THEN
     PERFORM public.acquire_room_date_locks(jsonb_build_array(
       jsonb_build_object('room_id', OLD.room_id, 'date', to_char(OLD.booking_date, 'YYYY-MM-DD')),
@@ -239,6 +252,10 @@ EXECUTE FUNCTION public.check_booking_conflict();
 ALTER FUNCTION public.acquire_room_date_locks(JSONB) OWNER TO postgres;
 REVOKE ALL ON FUNCTION public.acquire_room_date_locks(JSONB) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.acquire_room_date_locks(JSONB) TO authenticated, service_role;
+
+ALTER FUNCTION public.locapsico_lock_room_dates(JSONB) OWNER TO postgres;
+REVOKE ALL ON FUNCTION public.locapsico_lock_room_dates(JSONB) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.locapsico_lock_room_dates(JSONB) TO authenticated, service_role;
 
 ALTER FUNCTION public.acquire_room_date_lock(TEXT, DATE) OWNER TO postgres;
 REVOKE ALL ON FUNCTION public.acquire_room_date_lock(TEXT, DATE) FROM PUBLIC;
