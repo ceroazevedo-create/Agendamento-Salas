@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { validateFullBackupPayload, sanitizeCredentialsDeep } from '../../../scripts/backupValidation';
 
 export interface Env {
   SUPABASE_SERVICE_ROLE_KEY?: string;
@@ -14,8 +15,6 @@ export interface PagesFunctionContext<EnvType = Env> {
   next: (input?: Request | string, init?: RequestInit) => Promise<Response>;
   data: Record<string, unknown>;
 }
-
-const DEFAULT_SUPABASE_URL = 'https://gqpavuqopukyfeyqyrxc.supabase.co';
 
 const FORBIDDEN_CREDENTIAL_KEYS = new Set([
   'password',
@@ -58,9 +57,28 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   });
 }
 
+export const PRODUCTION_PROJECT_REF = 'gqpavuqopukyfeyqyrxc';
+
+function extractProjectRefFromUrl(urlStr: string): string | null {
+  try {
+    const parsed = new URL(urlStr);
+    const hostParts = parsed.hostname.split('.');
+    if (hostParts.length >= 3 && hostParts[1] === 'supabase' && hostParts[2] === 'co') {
+      return hostParts[0].toLowerCase();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function getSupabaseAdmin(env: Env): SupabaseClient {
-  const supabaseUrl = (env.SUPABASE_URL || env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL).trim();
+  const supabaseUrl = (env.SUPABASE_URL || env.VITE_SUPABASE_URL || '').trim();
   const serviceKey = (env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+
+  if (!supabaseUrl) {
+    throw new Error('Configuração ausente: SUPABASE_URL ou VITE_SUPABASE_URL não definida.');
+  }
 
   if (!serviceKey) {
     throw new Error('Chave de serviço SUPABASE_SERVICE_ROLE_KEY não configurada no ambiente do Cloudflare Pages.');
@@ -137,48 +155,7 @@ function detectAnonymizedPayload(backup: any): { isAnonymized: boolean; reason?:
   return { isAnonymized: false };
 }
 
-/**
- * Valida rigorosamente a estrutura do arquivo de Backup Completo do LocaPsico.
- */
-function validateFullBackupPayload(backup: any): { valid: boolean; error?: string } {
-  if (!backup || typeof backup !== 'object') {
-    return { valid: false, error: 'O conteúdo enviado não é um objeto JSON válido.' };
-  }
 
-  if (!backup.metadata || typeof backup.metadata !== 'object') {
-    return { valid: false, error: 'Arquivo inválido: bloco "metadata" ausente.' };
-  }
-
-  if (backup.metadata.system !== 'LocaPsico') {
-    return {
-      valid: false,
-      error: `Arquivo incompatível: o sistema de origem ("${backup.metadata.system || 'desconhecido'}") não é o LocaPsico.`
-    };
-  }
-
-  const anonCheck = detectAnonymizedPayload(backup);
-  if (anonCheck.isAnonymized) {
-    return {
-      valid: false,
-      error: `Operação bloqueada: Não é permitido restaurar um Backup Anonimizado. ${anonCheck.reason || ''} Utilize exclusivamente um arquivo de Backup Completo.`
-    };
-  }
-
-  if (!backup.data || typeof backup.data !== 'object') {
-    return { valid: false, error: 'Arquivo inválido: bloco "data" ausente.' };
-  }
-
-  for (const table of REQUIRED_TABLES) {
-    if (!Array.isArray(backup.data[table])) {
-      return {
-        valid: false,
-        error: `Estrutura de backup incompleta: a tabela "${table}" está ausente ou não é uma lista válida.`
-      };
-    }
-  }
-
-  return { valid: true };
-}
 
 async function upsertBookingsSafely(supabaseAdmin: SupabaseClient, bookings: any[]): Promise<number> {
   if (!bookings || bookings.length === 0) return 0;
@@ -259,15 +236,16 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
     const { request, env } = context;
 
     // 1. Verificar obrigatoriamente Authorization: Bearer <token>
-    const authHeader = request.headers.get('Authorization') || request.headers.get('authorization');
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    const rawAuth = request.headers.get('Authorization') || request.headers.get('authorization') || '';
+    const authHeader = rawAuth.trim();
+    if (!authHeader || (!authHeader.startsWith('Bearer ') && authHeader !== 'Bearer')) {
       return jsonResponse(
         { error: 'Não autorizado. Token de autenticação Bearer ausente.' },
         401
       );
     }
 
-    const token = authHeader.slice('Bearer '.length).trim();
+    const token = authHeader.replace(/^Bearer\s*/i, '').trim();
     if (!token) {
       return jsonResponse(
         { error: 'Não autorizado. Token de autenticação vazio ou malformado.' },
@@ -275,7 +253,7 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
       );
     }
 
-    const supabaseAdmin = getSupabaseAdmin(env);
+    const supabaseAdmin = (context.data?.supabaseAdmin as SupabaseClient) || getSupabaseAdmin(env);
 
     // 2. Validar o token no Supabase e identificar o administrador autenticado
     const { data: callerData, error: callerError } = await supabaseAdmin.auth.getUser(token);
@@ -290,16 +268,21 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
     const callerAdminEmail = (callerData.user.email || 'admin@admin.com.br').trim().toLowerCase();
 
     // 3. Verificar se o usuário autenticado possui role = 'admin'
-    const { data: callerProfile } = await supabaseAdmin
+    const { data: callerProfile, error: profileErr } = await supabaseAdmin
       .from('profiles')
       .select('*')
       .eq('id', callerAdminId)
       .maybeSingle();
 
+    if (profileErr) {
+      return jsonResponse(
+        { error: 'Falha ao consultar perfil administrativo no banco.' },
+        500
+      );
+    }
+
     const roleNormalized = String(callerProfile?.role || '').toLowerCase();
-    const isAdmin =
-      roleNormalized === 'admin' ||
-      callerAdminEmail === 'admin@admin.com.br';
+    const isAdmin = roleNormalized === 'admin';
 
     if (!isAdmin) {
       return jsonResponse(
@@ -335,6 +318,18 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
       );
     }
 
+    // Bloqueio rigoroso de segurança: impede restauração destrutiva no projeto de produção
+    const supabaseUrl = (env.SUPABASE_URL || env.VITE_SUPABASE_URL || '').trim();
+    const projectRef = extractProjectRefFromUrl(supabaseUrl);
+    if (projectRef === PRODUCTION_PROJECT_REF) {
+      return jsonResponse(
+        {
+          error: `[BLOQUEIO DE SEGURANÇA] Restauração abortada: Operações administrativas destrutivas são terminantemente proibidas contra o projeto de PRODUÇÃO (${PRODUCTION_PROJECT_REF}).`
+        },
+        403
+      );
+    }
+
     // 5. Capturar snapshot atual em memória para rollback automático caso ocorra falha crítica
     const [
       currProfilesRes,
@@ -367,13 +362,46 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
       settings: currSettingsRes.data || []
     };
 
+    // Rastreamento de contas Auth recém-criadas nesta execução para compensação isolada
+    const newlyCreatedAuthUserIds: string[] = [];
+
+    const rollbackCreatedAuthUsers = async () => {
+      if (newlyCreatedAuthUserIds.length > 0) {
+        const cleanupResults = await Promise.allSettled(
+          newlyCreatedAuthUserIds.map(uid => supabaseAdmin.auth.admin.deleteUser(uid))
+        );
+        const failedCleanups = cleanupResults.filter(r => r.status === 'rejected');
+        if (failedCleanups.length > 0) {
+          console.error(`[RESTORE COMPENSAÇÃO] Falha ao excluir ${failedCleanups.length} contas Auth temporárias:`, failedCleanups);
+        }
+      }
+    };
+
     try {
-      // 6. Mapear usuários existentes no Supabase Auth (auth.users) para garantir integridade de chave estrangeira
-      const { data: authListRes } = await supabaseAdmin.auth.admin.listUsers({
-        page: 1,
-        perPage: 1000
-      });
-      const existingAuthUsers = authListRes?.users || [];
+      // 6. Mapear usuários existentes no Supabase Auth (auth.users) com paginação completa
+      const existingAuthUsers: any[] = [];
+      let authPage = 1;
+      let hasMoreAuth = true;
+
+      while (hasMoreAuth) {
+        const { data: authListRes, error: authListErr } = await supabaseAdmin.auth.admin.listUsers({
+          page: authPage,
+          perPage: 1000
+        });
+
+        if (authListErr) {
+          throw new Error(`Falha ao listar usuários do Supabase Auth: ${authListErr.message}`);
+        }
+
+        const pageUsers = authListRes?.users || [];
+        existingAuthUsers.push(...pageUsers);
+
+        if (pageUsers.length < 1000) {
+          hasMoreAuth = false;
+        } else {
+          authPage++;
+        }
+      }
       const authUsersById = new Map<string, any>();
       const authUsersByEmail = new Map<string, any>();
 
@@ -439,7 +467,7 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
             status: p.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE'
           });
         } else if (pEmail) {
-          // Não existe no Auth atual: recriar no Supabase Auth com o mesmo UUID do backup para manter FKs intactas
+          // Não existe no Auth atual: provisionar nova conta e rastrear ID para compensação
           const tempPassword = `LocaPsico#${Math.random().toString(36).slice(-6)}9A!`;
           const { data: createdAuth, error: createAuthErr } = await supabaseAdmin.auth.admin.createUser({
             id: String(p.id),
@@ -454,18 +482,25 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
             }
           });
 
-          if (!createAuthErr && createdAuth?.user) {
-            const finalId = String(createdAuth.user.id);
-            profileIdMap.set(String(p.id), finalId);
-            authUsersById.set(finalId, createdAuth.user);
-            authUsersByEmail.set(pEmail, createdAuth.user);
-            profilesToUpsertMap.set(finalId, {
-              ...p,
-              id: finalId,
-              role: 'professional',
-              status: p.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE'
-            });
+          if (createAuthErr || !createdAuth?.user) {
+            await rollbackCreatedAuthUsers();
+            return jsonResponse(
+              { error: `Falha ao provisionar usuário ${pEmail} no Supabase Auth: ${createAuthErr?.message || 'Erro desconhecido'}` },
+              500
+            );
           }
+
+          const finalId = String(createdAuth.user.id);
+          newlyCreatedAuthUserIds.push(finalId);
+          profileIdMap.set(String(p.id), finalId);
+          authUsersById.set(finalId, createdAuth.user);
+          authUsersByEmail.set(pEmail, createdAuth.user);
+          profilesToUpsertMap.set(finalId, {
+            ...p,
+            id: finalId,
+            role: 'professional',
+            status: p.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE'
+          });
         }
       }
 
@@ -600,9 +635,55 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
           user_id: resolveProfileId(log.user_id)
         }));
 
+      const preparedBackupData = {
+        profiles: Array.from(profilesToUpsertMap.values()),
+        professionals: Array.from(professionalsByUserId.values()),
+        clients: clientsToUpsert,
+        rooms: roomsToUpsert,
+        bookings: bookingsToUpsert,
+        payments: paymentsToUpsert,
+        blocked_slots: blockedSlotsToUpsert,
+        settings: settingsToUpsert,
+        audit_logs: auditLogsToUpsert
+      };
+
+      // 7. EXECUÇÃO ATÔMICA VIA RPC POSTGRESQL (execute_admin_full_restore)
+      const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc('execute_admin_full_restore', {
+        p_backup_data: preparedBackupData,
+        p_caller_admin_id: callerAdminId
+      });
+
+      if (!rpcError && rpcResult?.success) {
+        return jsonResponse({
+          success: true,
+          message: 'Backup Completo restaurado com sucesso e atomicidade garantida no PostgreSQL!',
+          restoredAt: rpcResult.restored_at || new Date().toISOString(),
+          restoredBy: {
+            id: callerAdminId,
+            email: callerAdminEmail,
+            name: callerProfile?.full_name || 'Administrador'
+          },
+          totalRestored: rpcResult.total_records,
+          counts: rpcResult.counts
+        });
+      }
+
+      const isRpcMissing =
+        rpcError?.code === '42883' ||
+        (String(rpcError?.message || '').toLowerCase().includes('execute_admin_full_restore') &&
+         String(rpcError?.message || '').toLowerCase().includes('does not exist'));
+
+      if (!isRpcMissing) {
+        // Rollback atômico já efetuado pelo PostgreSQL; compensar contas Auth criadas
+        await rollbackCreatedAuthUsers();
+        return jsonResponse(
+          { error: `Falha na restauração atômica (rollback executado no banco): ${rpcError?.message || 'Erro desconhecido'}` },
+          500
+        );
+      }
+
       // =========================================================================
-      // FASE DE LIMPEZA ORDENADA (Tabelas Filhas -> Tabelas Mães)
-      // Remove registros operacionais anteriores sem jamais remover o Admin atual
+      // FASE DE LIMPEZA ORDENADA (Fallback apenas caso a RPC não exista)
       // =========================================================================
       await supabaseAdmin.from('payments').delete().not('id', 'is', null);
       await supabaseAdmin.from('bookings').delete().not('id', 'is', null);
@@ -642,7 +723,10 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
       }
 
       // 2. rooms
-      await upsertRoomsSafely(supabaseAdmin, roomsToUpsert);
+      const restoredRoomsCount = await upsertRoomsSafely(supabaseAdmin, roomsToUpsert);
+      if (roomsToUpsert.length > 0 && restoredRoomsCount < roomsToUpsert.length) {
+        throw new Error(`Erro ao restaurar 'rooms': apenas ${restoredRoomsCount} de ${roomsToUpsert.length} salas foram salvas.`);
+      }
 
       // 3. profiles
       const profilesArray = Array.from(profilesToUpsertMap.values());
@@ -678,6 +762,9 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
 
       // 6. bookings (inserido ANTES de blocked_slots para não acionar falso conflito com bloqueios posteriores)
       const restoredBookingsCount = await upsertBookingsSafely(supabaseAdmin, bookingsToUpsert);
+      if (bookingsToUpsert.length > 0 && restoredBookingsCount < bookingsToUpsert.length) {
+        throw new Error(`Erro ao restaurar 'bookings': apenas ${restoredBookingsCount} de ${bookingsToUpsert.length} agendamentos foram salvos.`);
+      }
 
       // 7. blocked_slots
       if (blockedSlotsToUpsert.length > 0) {
@@ -743,34 +830,53 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
         counts: restoredCounts
       });
     } catch (innerErr: any) {
+      await rollbackCreatedAuthUsers();
       // Rollback automático de emergência usando o preRestoreSnapshot
+      let rollbackFailureReason: string | null = null;
       try {
         if (preRestoreSnapshot.settings.length > 0) {
-          await supabaseAdmin.from('settings').upsert(preRestoreSnapshot.settings, { onConflict: 'id' });
+          const { error: sErr } = await supabaseAdmin.from('settings').upsert(preRestoreSnapshot.settings, { onConflict: 'id' });
+          if (sErr) throw new Error(`Falha ao restaurar settings: ${sErr.message}`);
         }
         if (preRestoreSnapshot.rooms.length > 0) {
-          await upsertRoomsSafely(supabaseAdmin, preRestoreSnapshot.rooms);
+          const count = await upsertRoomsSafely(supabaseAdmin, preRestoreSnapshot.rooms);
+          if (count < preRestoreSnapshot.rooms.length) throw new Error('Falha ao restaurar rooms integralmente');
         }
         if (preRestoreSnapshot.profiles.length > 0) {
-          await supabaseAdmin.from('profiles').upsert(preRestoreSnapshot.profiles, { onConflict: 'id' });
+          const { error: pErr } = await supabaseAdmin.from('profiles').upsert(preRestoreSnapshot.profiles, { onConflict: 'id' });
+          if (pErr) throw new Error(`Falha ao restaurar profiles: ${pErr.message}`);
         }
         if (preRestoreSnapshot.professionals.length > 0) {
-          await supabaseAdmin.from('professionals').upsert(preRestoreSnapshot.professionals, { onConflict: 'user_id' });
+          const { error: prErr } = await supabaseAdmin.from('professionals').upsert(preRestoreSnapshot.professionals, { onConflict: 'user_id' });
+          if (prErr) throw new Error(`Falha ao restaurar professionals: ${prErr.message}`);
         }
         if (preRestoreSnapshot.clients.length > 0) {
-          await supabaseAdmin.from('clients').upsert(preRestoreSnapshot.clients, { onConflict: 'id' });
+          const { error: cErr } = await supabaseAdmin.from('clients').upsert(preRestoreSnapshot.clients, { onConflict: 'id' });
+          if (cErr) throw new Error(`Falha ao restaurar clients: ${cErr.message}`);
         }
         if (preRestoreSnapshot.bookings.length > 0) {
-          await upsertBookingsSafely(supabaseAdmin, preRestoreSnapshot.bookings);
+          const count = await upsertBookingsSafely(supabaseAdmin, preRestoreSnapshot.bookings);
+          if (count < preRestoreSnapshot.bookings.length) throw new Error('Falha ao restaurar bookings integralmente');
         }
         if (preRestoreSnapshot.blocked_slots.length > 0) {
-          await supabaseAdmin.from('blocked_slots').upsert(preRestoreSnapshot.blocked_slots, { onConflict: 'id' });
+          const { error: blErr } = await supabaseAdmin.from('blocked_slots').upsert(preRestoreSnapshot.blocked_slots, { onConflict: 'id' });
+          if (blErr) throw new Error(`Falha ao restaurar blocked_slots: ${blErr.message}`);
         }
         if (preRestoreSnapshot.payments.length > 0) {
-          await supabaseAdmin.from('payments').upsert(preRestoreSnapshot.payments, { onConflict: 'id' });
+          const { error: payErr } = await supabaseAdmin.from('payments').upsert(preRestoreSnapshot.payments, { onConflict: 'id' });
+          if (payErr) throw new Error(`Falha ao restaurar payments: ${payErr.message}`);
         }
-      } catch {
-        // Ignora erro secundário durante rollback
+      } catch (rbErr: any) {
+        rollbackFailureReason = rbErr?.message || 'Erro durante execução do rollback.';
+      }
+
+      if (rollbackFailureReason) {
+        return jsonResponse(
+          {
+            error: `Falha crítica durante a restauração e falha no rollback: não é possível garantir a recuperação integral do estado anterior. Motivo do rollback: ${rollbackFailureReason}. Erro original: ${innerErr?.message || 'Erro inesperado'}`
+          },
+          500
+        );
       }
 
       return jsonResponse(

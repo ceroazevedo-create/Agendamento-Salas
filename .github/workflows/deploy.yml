@@ -24,6 +24,23 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Verify Production Target (Guard Against Staging Leaks)
+        env:
+          TARGET_URL: ${{ secrets.VITE_SUPABASE_URL || 'https://gqpavuqopukyfeyqyrxc.supabase.co' }}
+          PROD_REF: "gqpavuqopukyfeyqyrxc"
+          STAGING_REF: "rhuwvnusbzdgoaarhbkr"
+        run: |
+          echo "Verificando se a URL de build aponta estritamente para PRODUÇÃO..."
+          if [[ "$TARGET_URL" == *"$STAGING_REF"* ]]; then
+            echo "::error::[FALHA DE SEGURANÇA] URL de homologação ($STAGING_REF) detectada no workflow de deploy de PRODUÇÃO!"
+            exit 1
+          fi
+          if [[ "$TARGET_URL" != *"$PROD_REF"* ]]; then
+            echo "::error::[FALHA DE SEGURANÇA] A URL de destino ($TARGET_URL) não pertence ao projeto de produção autorizado ($PROD_REF)!"
+            exit 1
+          fi
+          echo "Validação concluída: O deploy para GitHub Pages está estritamente restrito a $PROD_REF."
+
       - name: Build
         run: npm run build
         env:

@@ -15,8 +15,6 @@ export interface PagesFunctionContext<EnvType = Env> {
   data: Record<string, unknown>;
 }
 
-const DEFAULT_SUPABASE_URL = 'https://gqpavuqopukyfeyqyrxc.supabase.co';
-
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -28,8 +26,12 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
 }
 
 function getSupabaseAdmin(env: Env) {
-  const supabaseUrl = (env.SUPABASE_URL || env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL).trim();
+  const supabaseUrl = (env.SUPABASE_URL || env.VITE_SUPABASE_URL || '').trim();
   const serviceKey = (env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+
+  if (!supabaseUrl) {
+    throw new Error('Configuração ausente: SUPABASE_URL ou VITE_SUPABASE_URL não definida.');
+  }
 
   if (!serviceKey) {
     throw new Error('Chave de serviço SUPABASE_SERVICE_ROLE_KEY não configurada no ambiente do Cloudflare Pages.');
@@ -80,15 +82,21 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
     }
 
     // 3. Verificar se o usuário autenticado possui autorização administrativa (role = 'admin')
-    const { data: callerProfile } = await supabaseAdmin
+    const { data: callerProfile, error: profileErr } = await supabaseAdmin
       .from('profiles')
       .select('role')
       .eq('id', callerData.user.id)
       .maybeSingle();
 
-    const isAdmin =
-      callerProfile?.role === 'admin' ||
-      callerData.user.email === 'admin@admin.com.br';
+    if (profileErr) {
+      return jsonResponse(
+        { error: 'Falha ao validar perfil administrativo no banco de dados.' },
+        500
+      );
+    }
+
+    const roleNormalized = String(callerProfile?.role || '').toLowerCase();
+    const isAdmin = roleNormalized === 'admin';
 
     if (!isAdmin) {
       return jsonResponse(

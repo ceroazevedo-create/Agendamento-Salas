@@ -634,6 +634,8 @@ export const bookingService = {
             recurrence_total: params.recurrenceTotal || null
           };
 
+          let lastInsertErr: any = null;
+
           const { data: createdWithFull, error: fullErr } = await supabase
             .from('bookings')
             .insert(fullPayload)
@@ -644,6 +646,7 @@ export const bookingService = {
             createdBookingId = String(createdWithFull.id);
             syncedToSupabase = true;
           } else {
+            lastInsertErr = fullErr;
             // Se falhar devido à ausência das colunas recurrence na tabela remota, tenta sem elas
             const stdPayload = { ...fullPayload };
             delete stdPayload.recurrence_id;
@@ -661,6 +664,7 @@ export const bookingService = {
               createdBookingId = String(createdWithPeriod.id);
               syncedToSupabase = true;
             } else {
+              lastInsertErr = periodErr || fullErr;
               // Se falhar também devido a period_shift/period_name
               delete stdPayload.period_shift;
               delete stdPayload.period_name;
@@ -675,9 +679,15 @@ export const bookingService = {
                 createdBookingId = String(createdStd.id);
                 syncedToSupabase = true;
               } else {
-                console.warn('Aviso ao inserir no Supabase (reserva preservada localmente):', stdErr || periodErr || fullErr);
+                lastInsertErr = stdErr || periodErr || fullErr;
+                console.warn('Falha ao inserir no Supabase:', lastInsertErr);
               }
             }
+          }
+
+          if (!syncedToSupabase) {
+            const errMsg = lastInsertErr ? translateSupabaseError(lastInsertErr) : 'Servidor Supabase indisponível.';
+            throw new Error(`Falha ao registrar reserva no banco de dados remoto: ${errMsg}`);
           }
         }
 
@@ -692,7 +702,8 @@ export const bookingService = {
           } catch {}
         }
       } catch (err: any) {
-        console.warn('Aviso na sincronização de reserva:', err);
+        console.warn('Erro na sincronização de reserva:', err);
+        throw err;
       }
     }
 

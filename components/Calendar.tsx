@@ -422,8 +422,9 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
         setShowSummaryView(false);
         setRecIdempotencyKey('');
 
-        const countConfirmed = result.createdCount ?? (result.createdBookings.length > 0 ? result.createdBookings.length : result.requestedCount);
-        const msgSuccess = `Série recorrente criada com sucesso! ${countConfirmed} reservas confirmadas.${result.skippedDates.length > 0 ? ` (${result.skippedDates.length} datas com conflito ignoradas)` : ''}`;
+        const countConfirmed = typeof result.createdCount === 'number'
+          ? result.createdCount
+          : (result.createdBookings.length > 0 ? result.createdBookings.length : 0);
 
         let refreshFailed = false;
         try {
@@ -433,13 +434,21 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
           refreshFailed = true;
         }
 
-        if (refreshFailed) {
+        if (countConfirmed === 0) {
           addToast(
-            `${msgSuccess} (Atenção: Houve instabilidade ao atualizar a visualização da agenda. Por favor, atualize a página se necessário.)`,
+            `Nenhuma reserva foi confirmada para esta série.${result.skippedDates.length > 0 ? ` Todas as ${result.skippedDates.length} datas geraram conflito.` : ''}`,
             'warning'
           );
         } else {
-          addToast(msgSuccess, 'success');
+          const msgSuccess = `Série recorrente criada com sucesso! ${countConfirmed} reservas confirmadas.${result.skippedDates.length > 0 ? ` (${result.skippedDates.length} datas com conflito ignoradas)` : ''}`;
+          if (refreshFailed) {
+            addToast(
+              `${msgSuccess} (Atenção: Houve instabilidade ao atualizar a visualização da agenda. Por favor, atualize a página se necessário.)`,
+              'warning'
+            );
+          } else {
+            addToast(msgSuccess, 'success');
+          }
         }
       } catch (err: any) {
         // Em caso de falha de comunicação ou timeout, mantém recIdempotencyKey para repetição com os mesmos parâmetros
@@ -1298,7 +1307,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                   <div>
                     <span className="text-[10px] font-bold text-teal-700 uppercase block">Frequência:</span>
                     <strong className="font-black">
-                      {recPreviewSummary.frequency === 'WEEKLY' ? 'Semanal' : recPreviewSummary.frequency === 'BIWEEKLY' ? 'Quinzenal' : 'Mensal'}
+                      {recPreviewSummary.frequency === 'DAILY' ? 'Diária' : recPreviewSummary.frequency === 'WEEKLY' ? 'Semanal' : recPreviewSummary.frequency === 'BIWEEKLY' ? 'Quinzenal' : 'Mensal'}
                     </strong>
                   </div>
                   <div>
@@ -1407,7 +1416,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                   <p className="text-[11px] text-amber-800 leading-relaxed">
                     Foram identificadas <strong>{recPreviewSummary.conflictCount}</strong> datas com conflito. Conforme as regras do LocaPsico, você pode cancelar a operação ou criar exclusivamente as datas disponíveis.
                   </p>
-                  <label className="flex items-start gap-2.5 p-2 bg-white/70 border border-amber-200 rounded-xl cursor-pointer select-none">
+                  <label className="flex items-start gap-2.5 p-2.5 bg-white/70 border border-amber-200 rounded-xl cursor-pointer select-none">
                     <input
                       type="checkbox"
                       checked={recSkipConflicts}
@@ -1415,9 +1424,24 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                       className="mt-0.5 rounded border-amber-400 text-teal-600 focus:ring-teal-500 w-4 h-4"
                     />
                     <span className="text-xs font-bold text-amber-950">
-                      <strong>Opção B:</strong> Confirmo e autorizo criar apenas as <strong>{recPreviewSummary.availableCount}</strong> datas disponíveis, ignorando silenciosamente os <strong>{recPreviewSummary.conflictCount}</strong> conflitos.
+                      <strong>Opção B:</strong> Confirmo e autorizo criar apenas as <strong>{recPreviewSummary.availableCount}</strong> datas disponíveis, ignorando os <strong>{recPreviewSummary.conflictCount}</strong> conflitos identificados.
                     </span>
                   </label>
+
+                  {recSkipConflicts && (
+                    <div className="p-3 bg-amber-100/70 border border-amber-300 rounded-xl space-y-1.5 text-xs">
+                      <span className="font-bold text-amber-950 uppercase text-[10px] block">
+                        Datas que serão ignoradas ({recPreviewSummary.conflictCount}):
+                      </span>
+                      <ul className="list-disc pl-4 space-y-0.5 text-[11px] text-amber-900">
+                        {recPreviewSummary.occurrences.filter(o => o.hasConflict).map(o => (
+                          <li key={o.date}>
+                            <strong>{format(parseISO(o.date), 'dd/MM/yyyy (EEEE)', { locale: ptBR })}</strong>: {o.conflictReason}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-800 text-xs flex items-center gap-2">
@@ -1533,6 +1557,14 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                               if (newDay >= 1 && newDay <= 6 && recWeekdays.length <= 1) {
                                 setRecWeekdays([newDay]);
                               }
+                              // Sincroniza data final da recorrência se a nova data inicial ultrapassar o limite atual
+                              if (recEndDate && newDateStr > recEndDate) {
+                                setRecEndDate(format(addMonths(new Date(y, m - 1, d, 12, 0, 0), 1), 'yyyy-MM-dd'));
+                              }
+                              // Invalida prévia anterior para forçar recálculo consistente
+                              setRecPreviewSummary(null);
+                              setShowSummaryView(false);
+                              setRecIdempotencyKey('');
                             }
                           }}
                           className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-2xl text-xs font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
@@ -1707,8 +1739,9 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                     <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
                       Frequência de Repetição
                     </label>
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                       {[
+                        { id: 'DAILY' as RecurrenceFrequency, label: 'Diária', sub: 'Seg a Sáb' },
                         { id: 'WEEKLY' as RecurrenceFrequency, label: 'Semanal', sub: 'A cada semana' },
                         { id: 'BIWEEKLY' as RecurrenceFrequency, label: 'Quinzenal', sub: 'A cada 2 semanas' },
                         { id: 'MONTHLY' as RecurrenceFrequency, label: 'Mensal', sub: 'Mesmo dia do mês' }
@@ -1735,7 +1768,14 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                   </div>
 
                   {/* Dias da Semana (Seção 3.E) */}
-                  {recFrequency !== 'MONTHLY' && (
+                  {recFrequency === 'DAILY' ? (
+                    <div className="p-2.5 bg-teal-50 border border-teal-200 rounded-xl text-teal-900 text-xs flex items-center gap-2">
+                      <CalendarIcon size={14} className="text-teal-600 shrink-0" />
+                      <span className="text-[11px] font-medium">
+                        A recorrência diária inclui todos os dias úteis e sábados (fechado aos domingos).
+                      </span>
+                    </div>
+                  ) : recFrequency !== 'MONTHLY' && (
                     <div>
                       <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1.5">
                         Dias da Semana (Permite múltiplos dias)

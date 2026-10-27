@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User } from './types';
 import { authService } from './services/authService';
-import { supabase } from './services/supabase';
+import { supabase, supabaseConfigError, supabaseEnvironment } from './services/supabase';
 import { AuthForms } from './components/AuthForms';
 import { Calendar } from './components/Calendar';
 import { UserDashboard } from './components/UserDashboard';
@@ -32,6 +32,11 @@ const AppContent: React.FC = () => {
   const { addToast } = useToast();
 
   useEffect(() => {
+    if (supabaseConfigError) {
+      setLoading(false);
+      return;
+    }
+
     let isMounted = true;
 
     // Timer de segurança: garante que a tela de carregamento nunca fique presa
@@ -143,6 +148,28 @@ const AppContent: React.FC = () => {
       window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     }, 50);
   };
+
+  if (supabaseConfigError) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-6 text-white font-sans">
+        <div className="max-w-md w-full bg-slate-800 border border-amber-500/40 rounded-2xl p-6 shadow-2xl">
+          <div className="w-12 h-12 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center mb-4">
+            <Shield size={24} />
+          </div>
+          <h2 className="text-lg font-black text-amber-400 tracking-tight mb-2">
+            Barreira de Proteção de Ambiente
+          </h2>
+          <div className="text-xs text-slate-300 leading-relaxed mb-4 bg-slate-950/70 p-3 rounded-xl border border-slate-700 font-mono">
+            {supabaseConfigError}
+          </div>
+          <div className="text-xs text-slate-400 space-y-1.5 border-t border-slate-700/60 pt-3">
+            <p><span className="text-slate-300 font-bold">Ambiente detectado:</span> {supabaseEnvironment === 'staging' ? 'Homologação (rhuwvnusbzdgoaarhbkr)' : supabaseEnvironment}</p>
+            <p><span className="text-slate-300 font-bold">Ação necessária:</span> Defina a variável pública no arquivo <code className="text-amber-300 bg-slate-950 px-1 py-0.5 rounded">.env.staging.local</code> conforme o modelo <code className="text-teal-400 bg-slate-950 px-1 py-0.5 rounded">.env.staging.example</code>.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (

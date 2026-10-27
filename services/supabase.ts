@@ -8,6 +8,7 @@ import { createClient } from '@supabase/supabase-js';
 
 declare global {
   interface ImportMetaEnv {
+    readonly MODE?: string;
     readonly VITE_SUPABASE_URL?: string;
     readonly VITE_SUPABASE_ANON_KEY?: string;
   }
@@ -16,12 +17,71 @@ declare global {
   }
 }
 
-// Valores padrão para o projeto sistema-salas (gqpavuqopukyfeyqyrxc)
-const defaultUrl = 'https://gqpavuqopukyfeyqyrxc.supabase.co';
-const defaultAnonKey = 'sb_publishable_idoSyVhNDWy33hjn4xCUpw_wjpcB8CS';
+export const PRODUCTION_PROJECT_REF = 'gqpavuqopukyfeyqyrxc';
+export const STAGING_PROJECT_REF = 'rhuwvnusbzdgoaarhbkr';
 
-const envUrl = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_URL) || (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_URL) || defaultUrl;
-const envAnonKey = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_ANON_KEY) || (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_ANON_KEY) || defaultAnonKey;
+// Valores padrão para o projeto de produção sistema-salas (gqpavuqopukyfeyqyrxc)
+const prodDefaultUrl = `https://${PRODUCTION_PROJECT_REF}.supabase.co`;
+const prodDefaultAnonKey = 'sb_publishable_idoSyVhNDWy33hjn4xCUpw_wjpcB8CS';
+const stagingDefaultUrl = `https://${STAGING_PROJECT_REF}.supabase.co`;
+
+const currentMode =
+  (typeof import.meta !== 'undefined' && import.meta.env?.MODE) ||
+  (typeof process !== 'undefined' && (process.env?.NODE_ENV || process.env?.MODE)) ||
+  'production';
+
+const unparsedEnvUrl =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_URL) ||
+  (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_URL) ||
+  '';
+const rawEnvUrl = (unparsedEnvUrl.startsWith('http://') || unparsedEnvUrl.startsWith('https://')) ? unparsedEnvUrl : '';
+
+const rawEnvAnonKey =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_ANON_KEY) ||
+  (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_ANON_KEY) ||
+  '';
+
+// Determina o ambiente ativo
+export type SupabaseEnvironment = 'staging' | 'production' | 'unknown';
+export const supabaseEnvironment: SupabaseEnvironment =
+  currentMode === 'staging' || rawEnvUrl.includes(STAGING_PROJECT_REF)
+    ? 'staging'
+    : (currentMode === 'production' || rawEnvUrl.includes(PRODUCTION_PROJECT_REF) || !rawEnvUrl)
+      ? 'production'
+      : 'unknown';
+
+// Validação com fail-closed
+let configError: string | null = null;
+let resolvedUrl = '';
+let resolvedAnonKey = '';
+
+if (supabaseEnvironment === 'staging') {
+  // Staging: NUNCA permite conexão ao banco de produção
+  if (rawEnvUrl && rawEnvUrl.includes(PRODUCTION_PROJECT_REF)) {
+    configError = `[BLOQUEIO DE SEGURANÇA] Tentativa de conectar ao banco de PRODUÇÃO (${PRODUCTION_PROJECT_REF}) em ambiente de homologação (staging). Operação cancelada.`;
+  } else if (rawEnvAnonKey === prodDefaultAnonKey) {
+    configError = `[BLOQUEIO DE SEGURANÇA] A chave anônima de PRODUÇÃO não pode ser utilizada no projeto de homologação (${STAGING_PROJECT_REF}).`;
+  } else if (!rawEnvAnonKey) {
+    configError = `[CONFIGURAÇÃO PENDENTE] Chave pública (VITE_SUPABASE_ANON_KEY) de homologação não foi configurada para o projeto ${STAGING_PROJECT_REF}. Defina VITE_SUPABASE_ANON_KEY no arquivo .env.staging.local.`;
+  } else {
+    resolvedUrl = rawEnvUrl || stagingDefaultUrl;
+    resolvedAnonKey = rawEnvAnonKey;
+  }
+} else if (supabaseEnvironment === 'production') {
+  // Produção: NUNCA permite conectar a staging por engano
+  if (rawEnvUrl && rawEnvUrl.includes(STAGING_PROJECT_REF)) {
+    configError = `[BLOQUEIO DE SEGURANÇA] URL do projeto de homologação (${STAGING_PROJECT_REF}) informada em ambiente de PRODUÇÃO. Operação cancelada.`;
+  } else {
+    resolvedUrl = rawEnvUrl || prodDefaultUrl;
+    resolvedAnonKey = rawEnvAnonKey || prodDefaultAnonKey;
+  }
+} else {
+  configError = `[CONFIGURAÇÃO INVÁLIDA] Ambiente Supabase desconhecido. Verifique as variáveis VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.`;
+}
+
+if (configError) {
+  console.error('[Supabase Config Error]', configError);
+}
 
 // Funções para sanitizar URL e Chave do Supabase
 function sanitizeUrl(url?: string): string | null {
@@ -47,18 +107,17 @@ function sanitizeAnonKey(key?: string): string | null {
 }
 
 // Obtenção da URL e Chave validadas
-const validEnvUrl = sanitizeUrl(envUrl);
-const validEnvKey = sanitizeAnonKey(envAnonKey);
+const validResolvedUrl = sanitizeUrl(resolvedUrl);
+const validResolvedKey = sanitizeAnonKey(resolvedAnonKey);
 
-const validDefaultUrl = sanitizeUrl(defaultUrl) || 'https://placeholder.supabase.co';
-const validDefaultKey = sanitizeAnonKey(defaultAnonKey) || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy';
-
-export const supabaseUrl: string = validEnvUrl || validDefaultUrl;
-export const supabaseAnonKey: string = validEnvKey || validDefaultKey;
+export const supabaseConfigError: string | null = configError;
+export const supabaseUrl: string = (!configError && validResolvedUrl) ? validResolvedUrl : 'https://placeholder.supabase.co';
+export const supabaseAnonKey: string = (!configError && validResolvedKey) ? validResolvedKey : 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy';
 
 export const isKeyFromClerk = false;
 
 export const isSupabaseConfigured: boolean = Boolean(
+  !supabaseConfigError &&
   supabaseUrl &&
   !supabaseUrl.includes('placeholder') &&
   (supabaseUrl.startsWith('https://') || supabaseUrl.startsWith('http://')) &&

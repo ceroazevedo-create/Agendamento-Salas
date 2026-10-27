@@ -83,7 +83,7 @@ export interface Booking {
   recurrenceTotal?: number; // Total de ocorrências criadas na série
 }
 
-export type RecurrenceFrequency = 'WEEKLY' | 'BIWEEKLY' | 'MONTHLY';
+export type RecurrenceFrequency = 'DAILY' | 'WEEKLY' | 'BIWEEKLY' | 'MONTHLY';
 export type RecurrenceEndType = 'UNTIL_DATE' | 'OCCURRENCES';
 
 export interface RecurrenceConfig {

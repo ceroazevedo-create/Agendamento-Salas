@@ -17,8 +17,6 @@ export interface PagesFunctionContext<EnvType = Env> {
 
 export type BackupMode = 'full' | 'anonymized';
 
-const DEFAULT_SUPABASE_URL = 'https://gqpavuqopukyfeyqyrxc.supabase.co';
-
 const FORBIDDEN_CREDENTIAL_KEYS = new Set([
   'password',
   'password_hash',
@@ -49,8 +47,12 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
 }
 
 function getSupabaseAdmin(env: Env) {
-  const supabaseUrl = (env.SUPABASE_URL || env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL).trim();
+  const supabaseUrl = (env.SUPABASE_URL || env.VITE_SUPABASE_URL || '').trim();
   const serviceKey = (env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+
+  if (!supabaseUrl) {
+    throw new Error('Configuração ausente: SUPABASE_URL ou VITE_SUPABASE_URL não definida.');
+  }
 
   if (!serviceKey) {
     throw new Error('Chave de serviço SUPABASE_SERVICE_ROLE_KEY não configurada no ambiente do Cloudflare Pages.');
@@ -62,6 +64,46 @@ function getSupabaseAdmin(env: Env) {
       persistSession: false
     }
   });
+}
+
+const PAGE_SIZE = 1000;
+
+/**
+ * Consulta todos os registros de uma tabela paginando em lotes de PAGE_SIZE,
+ * garantindo ordenação estável por ID e sem retorno silencioso de dados parciais.
+ */
+async function fetchAllTableRecords(
+  supabaseAdmin: any,
+  table: string,
+  orderColumn = 'id'
+): Promise<any[]> {
+  const allRows: any[] = [];
+  let from = 0;
+  let hasMore = true;
+
+  while (hasMore) {
+    const to = from + PAGE_SIZE - 1;
+    const { data, error } = await supabaseAdmin
+      .from(table)
+      .select('*')
+      .order(orderColumn, { ascending: true })
+      .range(from, to);
+
+    if (error) {
+      throw new Error(`Falha ao ler a tabela '${table}': ${error.message || 'Erro desconhecido'}`);
+    }
+
+    const rows = data || [];
+    allRows.push(...rows);
+
+    if (rows.length < PAGE_SIZE) {
+      hasMore = false;
+    } else {
+      from += PAGE_SIZE;
+    }
+  }
+
+  return allRows;
 }
 
 /**
@@ -303,16 +345,21 @@ async function handleBackupRequest(context: PagesFunctionContext<Env>): Promise<
     }
 
     // 3. Verificar se o usuário autenticado possui autorização administrativa (role = 'admin')
-    const { data: callerProfile } = await supabaseAdmin
+    const { data: callerProfile, error: profileErr } = await supabaseAdmin
       .from('profiles')
       .select('role, full_name, email')
       .eq('id', callerData.user.id)
       .maybeSingle();
 
+    if (profileErr) {
+      return jsonResponse(
+        { error: 'Falha ao consultar perfil administrativo no banco.' },
+        500
+      );
+    }
+
     const roleNormalized = String(callerProfile?.role || '').toLowerCase();
-    const isAdmin =
-      roleNormalized === 'admin' ||
-      callerData.user.email?.toLowerCase() === 'admin@admin.com.br';
+    const isAdmin = roleNormalized === 'admin';
 
     if (!isAdmin) {
       return jsonResponse(
@@ -323,61 +370,39 @@ async function handleBackupRequest(context: PagesFunctionContext<Env>): Promise<
 
     const mode = await resolveBackupMode(request);
 
-    // 4. Consultar (SOMENTE LEITURA) todas as tabelas utilizadas pelo aplicativo
+    // 4. Consultar (SOMENTE LEITURA) todas as tabelas utilizadas pelo aplicativo com paginação completa
     const [
-      profilesRes,
-      professionalsRes,
-      clientsRes,
-      roomsRes,
-      bookingsRes,
-      paymentsRes,
-      blockedSlotsRes,
-      settingsRes,
-      auditLogsRes
+      profilesData,
+      professionalsData,
+      clientsData,
+      roomsData,
+      bookingsData,
+      paymentsData,
+      blockedSlotsData,
+      settingsData,
+      auditLogsData
     ] = await Promise.all([
-      supabaseAdmin.from('profiles').select('*').order('created_at', { ascending: true }),
-      supabaseAdmin.from('professionals').select('*').order('created_at', { ascending: true }),
-      supabaseAdmin.from('clients').select('*').order('created_at', { ascending: true }),
-      supabaseAdmin.from('rooms').select('*').order('id', { ascending: true }),
-      supabaseAdmin.from('bookings').select('*').order('booking_date', { ascending: false }),
-      supabaseAdmin.from('payments').select('*').order('created_at', { ascending: false }),
-      supabaseAdmin.from('blocked_slots').select('*').order('blocked_date', { ascending: false }),
-      supabaseAdmin.from('settings').select('*'),
-      supabaseAdmin.from('audit_logs').select('*').order('timestamp', { ascending: false })
+      fetchAllTableRecords(supabaseAdmin, 'profiles', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'professionals', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'clients', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'rooms', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'bookings', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'payments', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'blocked_slots', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'settings', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'audit_logs', 'id')
     ]);
 
-    const tableErrors = [
-      { table: 'profiles', error: profilesRes.error },
-      { table: 'professionals', error: professionalsRes.error },
-      { table: 'clients', error: clientsRes.error },
-      { table: 'rooms', error: roomsRes.error },
-      { table: 'bookings', error: bookingsRes.error },
-      { table: 'payments', error: paymentsRes.error },
-      { table: 'blocked_slots', error: blockedSlotsRes.error },
-      { table: 'settings', error: settingsRes.error },
-      { table: 'audit_logs', error: auditLogsRes.error }
-    ].filter(item => item.error !== null);
-
-    if (tableErrors.length > 0) {
-      const firstErr = tableErrors[0];
-      return jsonResponse(
-        {
-          error: `Falha ao ler a tabela '${firstErr.table}': ${firstErr.error?.message || 'Erro desconhecido'}`
-        },
-        500
-      );
-    }
-
     const rawData = {
-      profiles: (profilesRes.data || []).map(sanitizeRecordCredentials),
-      professionals: (professionalsRes.data || []).map(sanitizeRecordCredentials),
-      clients: (clientsRes.data || []).map(sanitizeRecordCredentials),
-      rooms: (roomsRes.data || []).map(sanitizeRecordCredentials),
-      bookings: (bookingsRes.data || []).map(sanitizeRecordCredentials),
-      payments: (paymentsRes.data || []).map(sanitizeRecordCredentials),
-      blocked_slots: (blockedSlotsRes.data || []).map(sanitizeRecordCredentials),
-      settings: (settingsRes.data || []).map(sanitizeRecordCredentials),
-      audit_logs: (auditLogsRes.data || []).map(sanitizeRecordCredentials)
+      profiles: profilesData.map(sanitizeRecordCredentials),
+      professionals: professionalsData.map(sanitizeRecordCredentials),
+      clients: clientsData.map(sanitizeRecordCredentials),
+      rooms: roomsData.map(sanitizeRecordCredentials),
+      bookings: bookingsData.map(sanitizeRecordCredentials),
+      payments: paymentsData.map(sanitizeRecordCredentials),
+      blocked_slots: blockedSlotsData.map(sanitizeRecordCredentials),
+      settings: settingsData.map(sanitizeRecordCredentials),
+      audit_logs: auditLogsData.map(sanitizeRecordCredentials)
     };
 
     const data = mode === 'anonymized' ? anonymizeDataset(rawData) : rawData;

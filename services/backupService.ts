@@ -10,6 +10,7 @@ import {
   saveSystemConfig,
   addAuditLog
 } from './storageService';
+import { validateFullBackupPayload } from '../scripts/backupValidation';
 
 export type BackupMode = 'full' | 'anonymized';
 
@@ -820,85 +821,40 @@ export const backupService = {
       };
     }
 
-    // Bloqueio estrito de Backup Anonimizado (por metadados, nome de arquivo ou inspeção dos registros)
-    const isMetaAnonymized =
-      String(meta.backupType || '').toUpperCase() === 'ANONIMIZADO' ||
-      meta.isAnonymized === true ||
-      meta.restorable === false ||
-      String(meta.description || '').toUpperCase().includes('ANONIMIZADO') ||
-      String(meta.generatedBy?.email || '').endsWith('@anonimizado.local');
-
     const isFileNameAnonymized = Boolean(
       fileName && fileName.toLowerCase().includes('anonimizado')
     );
-
-    const data = parsed.data;
-    if (!data || typeof data !== 'object') {
-      return {
-        valid: false,
-        fileName,
-        error: 'Arquivo inválido: bloco de dados ("data") não encontrado.'
-      };
-    }
-
-    let hasMaskedRecords = false;
-    const sampleRows = [
-      ...(Array.isArray(data.profiles) ? data.profiles : []),
-      ...(Array.isArray(data.professionals) ? data.professionals : []),
-      ...(Array.isArray(data.clients) ? data.clients : [])
-    ];
-
-    for (const row of sampleRows) {
-      if (!row || typeof row !== 'object') continue;
-      const email = String(row.email || '').toLowerCase();
-      const cpf = String(row.cpf || '');
-      const phone = String(row.phone || '');
-      const name = String(row.full_name || row.name || '');
-
-      if (
-        email.endsWith('@anonimizado.local') ||
-        cpf === '***.***.***-**' ||
-        phone === '(**) *****-****' ||
-        name.includes('Anonimizado #') ||
-        String(row.crp || '') === 'CRP-ANONIMIZADO'
-      ) {
-        hasMaskedRecords = true;
-        break;
-      }
-    }
-
-    if (isMetaAnonymized || isFileNameAnonymized || hasMaskedRecords) {
+    if (isFileNameAnonymized) {
       return {
         valid: false,
         isAnonymizedDetected: true,
         fileName,
         error:
           'RESTAURAÇÃO BLOQUEADA: Este arquivo é um BACKUP ANONIMIZADO (LGPD) com dados mascarados. ' +
-          'Restaurá-lo sobrescreveria nomes, CPFs, telefones e e-mails reais por máscaras. ' +
           'Selecione exclusivamente um arquivo de BACKUP COMPLETO (locapsico_backup_completo_...).'
       };
     }
 
-    for (const table of REQUIRED_TABLES) {
-      if (!Array.isArray(data[table])) {
-        return {
-          valid: false,
-          fileName,
-          error: `Arquivo de backup incompleto: a tabela obrigatória "${table}" não foi encontrada no arquivo.`
-        };
-      }
+    const validation = validateFullBackupPayload(parsed);
+    if (!validation.valid) {
+      return {
+        valid: false,
+        isAnonymizedDetected: validation.isAnonymized,
+        fileName,
+        error: validation.error || 'Arquivo de backup inválido para restauração.'
+      };
     }
 
-    const counts: BackupCounts = {
-      profiles: data.profiles.length,
-      professionals: data.professionals.length,
-      clients: data.clients.length,
-      rooms: data.rooms.length,
-      bookings: data.bookings.length,
-      payments: data.payments.length,
-      blocked_slots: data.blocked_slots.length,
-      settings: data.settings.length,
-      audit_logs: data.audit_logs.length
+    const counts = validation.counts || {
+      profiles: parsed.data.profiles.length,
+      professionals: parsed.data.professionals.length,
+      clients: parsed.data.clients.length,
+      rooms: parsed.data.rooms.length,
+      bookings: parsed.data.bookings.length,
+      payments: parsed.data.payments.length,
+      blocked_slots: parsed.data.blocked_slots.length,
+      settings: parsed.data.settings.length,
+      audit_logs: parsed.data.audit_logs.length
     };
 
     const totalRecords = Object.values(counts).reduce((acc, c) => acc + c, 0);
@@ -909,7 +865,7 @@ export const backupService = {
       payload: parsed as SystemBackupPayload,
       summary: {
         system: String(meta.system),
-        schemaVersion: String(meta.schemaVersion || '1.0'),
+        schemaVersion: String(meta.schemaVersion || '1.1'),
         backupType: 'COMPLETO',
         generatedAt: String(meta.generatedAt || ''),
         generatedByName: String(meta.generatedBy?.name || 'Administrador'),

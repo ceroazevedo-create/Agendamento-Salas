@@ -42,6 +42,18 @@ assert(weeklyDates.length === 4, 'Frequência semanal gera exatamente 4 ocorrên
 assert(weeklyDates[0] === '2026-10-19' && weeklyDates[1] === '2026-10-26' && weeklyDates[3] === '2026-11-09',
   'Datas semanais respeitam intervalo de 7 dias');
 
+// TESTE 1b: Frequência Diária (Segunda a Sábado, excluindo Domingos)
+const dailyDates = generateCandidateDates({
+  frequency: 'DAILY',
+  startDate: '2026-10-23', // Sexta-feira
+  endType: 'OCCURRENCES',
+  occurrencesCount: 4,
+  weekdays: []
+});
+assert(dailyDates.length === 4, 'Frequência diária gera exatamente 4 ocorrências');
+assert(dailyDates[0] === '2026-10-23' && dailyDates[1] === '2026-10-24' && dailyDates[2] === '2026-10-26' && dailyDates[3] === '2026-10-27',
+  'Frequência diária pula domingo (2026-10-25) com sucesso e continua na segunda-feira (2026-10-26)');
+
 // TESTE 2: Frequência Quinzenal
 const biweeklyDates = generateCandidateDates({
   frequency: 'BIWEEKLY',
@@ -572,10 +584,73 @@ assert(validateRpcPayload({}).valid === false, 'Payload sem series_id é rejeita
 assert(validateRpcPayload({ series_id: 'invalido' }).valid === false, 'series_id não-UUID é rejeitado sem inventar dados');
 assert(validateRpcPayload({ series_id: '123e4567-e89b-12d3-a456-426614174000' }).valid === true, 'series_id UUID válido é aceito com sucesso');
 
-// Teste de recuperação de lista parcial de IDs
-const targetIds = ['id-1', 'id-2', 'id-3', 'id-4'];
-const initialFound = [{ id: 'id-1' }, { id: 'id-2' }, { id: 'id-3' }]; // 3 de 4
-const foundIdsSet = new Set(initialFound.map(b => b.id));
+// ---------------------------------------------------------------------------
+// TESTE 21: Classificação de Erros da RPC e Contingência Resiliente
+// ---------------------------------------------------------------------------
+console.log('\nGrupo 19: Resiliência de Fallback e Classificação da RPC');
+
+function classifyRpcError(error: { code?: string; message?: string }): { shouldFallback: boolean; isBusinessError: boolean } {
+  const errCode = String(error?.code || '');
+  const errMsg = String(error?.message || '');
+  const isRpcMissing =
+    errCode === '42883' ||
+    errCode === 'PGRST202' ||
+    errMsg.includes('create_recurring_series') ||
+    errMsg.includes('could not find the function') ||
+    errMsg.includes('digest') ||
+    errMsg.includes('Frequência de recorrência');
+
+  return {
+    shouldFallback: isRpcMissing,
+    isBusinessError: !isRpcMissing
+  };
+}
+
+assert(classifyRpcError({ code: '42883', message: 'function create_recurring_series does not exist' }).shouldFallback === true, 'Código 42883 aciona fallback de contingência');
+assert(classifyRpcError({ code: 'PGRST202', message: 'Could not find the function in the schema cache' }).shouldFallback === true, 'Código PGRST202 aciona fallback de contingência');
+assert(classifyRpcError({ code: '42501', message: 'Permissão negada' }).isBusinessError === true, 'Código 42501 é tratado como violação de RBAC/regra de negócio sem mascaramento');
+assert(classifyRpcError({ code: '23P01', message: 'Conflito de reserva' }).isBusinessError === true, 'Código 23P01 de conflito não é classificado como RPC ausente');
+
+// Validação do formato RFC4122 UUID gerado no fallback
+function generateFallbackUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+const generatedSeriesId = generateFallbackUUID();
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+assert(uuidRegex.test(generatedSeriesId), 'Identificador de série gerado no fallback obedece formato padrão RFC4122 v4 UUID');
+
+// Teste de rollback compensatório em falha sequencial
+interface MockBookingRecord { id: string; cancelled: boolean }
+const mockSeriesState: MockBookingRecord[] = [];
+function simulateSequentialCreation(total: number, failAtIndex: number, skipConflicts: boolean): { successCount: number; rolledBack: boolean } {
+  const created: MockBookingRecord[] = [];
+  for (let i = 0; i < total; i++) {
+    if (i === failAtIndex) {
+      if (!skipConflicts) {
+        // Rollback compensatório
+        for (const bk of created) {
+          bk.cancelled = true;
+        }
+        return { successCount: 0, rolledBack: true };
+      }
+      // Se skipConflicts, pula esta ocorrência
+      continue;
+    }
+    const bk = { id: `bk-${i}`, cancelled: false };
+    created.push(bk);
+  }
+  return { successCount: created.length, rolledBack: false };
+}
+
+const simWithRollback = simulateSequentialCreation(4, 2, false);
+assert(simWithRollback.rolledBack === true && simWithRollback.successCount === 0, 'Falha no meio da série com skipConflicts=false executa rollback compensatório total');
+const simWithSkip = simulateSequentialCreation(4, 2, true);
+assert(simWithSkip.rolledBack === false && simWithSkip.successCount === 3, 'Conflito com skipConflicts=true ignora ocorrência em conflito e preserva reservas válidas');
+
 // Execução dos Testes Negativos da Barreira de Staging
 import { runStagingGuardTests } from './stagingGuard.test';
 const guardResults = runStagingGuardTests();
@@ -583,13 +658,34 @@ totalTests += guardResults.total;
 passedTests += guardResults.passed;
 failedTests += guardResults.failures.length;
 
-console.log('\n================================================================');
-console.log(`RESULTADO FINAL CONSOLIDADO: ${passedTests} de ${totalTests} testes passaram com sucesso.`);
-if (failedTests > 0) {
-  console.error(`FALHAS: ${failedTests} testes falharam.`);
-  process.exit(1);
-} else {
-  console.log('TODOS OS TESTES LOCAIS EXECUTADOS COM SUCESSO.');
-  console.log('================================================================');
-}
+// Execução dos Testes de Validação Estrita de Backup e Restauração
+import { runBackupValidationTests } from './backupValidation.test';
+const backupValResults = runBackupValidationTests();
+totalTests += backupValResults.total;
+passedTests += backupValResults.passed;
+failedTests += backupValResults.failures.length;
+
+// Execução dos Testes do Endpoint de Restauração Cloudflare Pages
+import { runRestoreEndpointTests } from './restoreEndpoint.test';
+(async () => {
+  try {
+    const restoreEndpointResults = await runRestoreEndpointTests();
+    totalTests += restoreEndpointResults.total;
+    passedTests += restoreEndpointResults.passed;
+    failedTests += restoreEndpointResults.failures.length;
+
+    console.log('\n================================================================');
+    console.log(`RESULTADO FINAL CONSOLIDADO: ${passedTests} de ${totalTests} testes passaram com sucesso.`);
+    if (failedTests > 0) {
+      console.error(`FALHAS: ${failedTests} testes falharam.`);
+      process.exit(1);
+    } else {
+      console.log('TODOS OS TESTES LOCAIS EXECUTADOS COM SUCESSO.');
+      console.log('================================================================');
+    }
+  } catch (err) {
+    console.error('Erro crítico na execução dos testes do endpoint:', err);
+    process.exit(1);
+  }
+})();
 

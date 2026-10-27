@@ -11,8 +11,17 @@ node_modules
 dist
 dist-ssr
 *.local
+.env.local
+.env.*.local
+.env.staging.local
 bun.lock
 bun.lockb
+
+# Local backups and previous server versions
+index.html.backup
+server-anterior.ts
+server-anterior2.ts
+server.ts.backup
 
 # Editor directories and files
 .vscode/*

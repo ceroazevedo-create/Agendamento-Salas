@@ -26,7 +26,7 @@ export function generateCandidateDates(config: RecurrenceConfig): string[] {
   if (!startDate) return [];
 
   const [startY, startM, startD] = startDate.split('-').map(Number);
-  const startObj = new Date(startY, startM - 1, startD);
+  const startObj = new Date(startY, startM - 1, startD, 12, 0, 0);
   if (!isValid(startObj)) return [];
 
   const startDayOfWeek = startObj.getDay();
@@ -37,7 +37,44 @@ export function generateCandidateDates(config: RecurrenceConfig): string[] {
 
   const maxOccurrences = Math.min(Math.max(1, occurrencesCount), 52); // limite de segurança
 
-  if (frequency === 'WEEKLY') {
+  if (frequency === 'DAILY') {
+    let currentDayDate = startObj;
+    let iterations = 0;
+
+    while (iterations < 120) {
+      iterations++;
+      const curDow = currentDayDate.getDay();
+      // Não inclui domingos, pois a clínica permanece fechada aos domingos
+      if (curDow !== 0) {
+        const dayCandidateStr = format(currentDayDate, 'yyyy-MM-dd');
+
+        if (dayCandidateStr >= startDate) {
+          if (endType === 'UNTIL_DATE') {
+            if (endDate && dayCandidateStr > endDate) {
+              return Array.from(new Set(dates)).sort();
+            }
+          } else {
+            if (dates.length >= maxOccurrences) {
+              return Array.from(new Set(dates)).sort();
+            }
+          }
+
+          if (!dates.includes(dayCandidateStr)) {
+            dates.push(dayCandidateStr);
+          }
+
+          if (endType === 'OCCURRENCES' && dates.length >= maxOccurrences) {
+            return Array.from(new Set(dates)).sort();
+          }
+        }
+      }
+
+      currentDayDate = addDays(currentDayDate, 1);
+      if (endType === 'UNTIL_DATE' && endDate && format(currentDayDate, 'yyyy-MM-dd') > endDate && dates.length > 0) {
+        break;
+      }
+    }
+  } else if (frequency === 'WEEKLY') {
     let currentWeekDate = startObj;
     let iterations = 0;
 
@@ -124,13 +161,13 @@ export function generateCandidateDates(config: RecurrenceConfig): string[] {
     let monthOffset = 0;
 
     while (monthOffset < 48) {
-      const targetYearMonth = addMonths(new Date(startObj.getFullYear(), startObj.getMonth(), 1), monthOffset);
+      const targetYearMonth = addMonths(new Date(startObj.getFullYear(), startObj.getMonth(), 1, 12, 0, 0), monthOffset);
       const year = targetYearMonth.getFullYear();
       const month = targetYearMonth.getMonth();
 
       const daysInTargetMonth = new Date(year, month + 1, 0).getDate();
       const actualDay = Math.min(originalDayOfMonth, daysInTargetMonth);
-      const candidateDate = new Date(year, month, actualDay);
+      const candidateDate = new Date(year, month, actualDay, 12, 0, 0);
       const dayCandidateStr = format(candidateDate, 'yyyy-MM-dd');
 
       if (dayCandidateStr >= startDate) {
@@ -160,7 +197,7 @@ export function generateCandidateDates(config: RecurrenceConfig): string[] {
     }
   }
 
-  return dates.sort();
+  return Array.from(new Set(dates)).sort();
 }
 
 /**
@@ -365,96 +402,127 @@ export async function createRecurringSeries(params: {
       effectiveClientId = trimmed;
     }
 
-    const rpcParams = {
-      p_room_id: params.roomId,
-      p_professional_id: params.userId,
-      p_client_id: effectiveClientId,
-      p_booking_type: params.type || 'HOURLY',
-      p_hour: startHour,
-      p_duration_hours: durationHours,
-      p_period_shift: isPeriod ? (params.periodShift || 'MORNING') : null,
-      p_period_name: isPeriod ? (params.periodName || periodConf?.name || 'Turno') : null,
-      p_recurrence_rule: params.config.frequency,
-      p_dates: candidateDates,
-      p_skip_conflicts: params.skipConflicts,
-      p_notes: params.notes || null,
-      p_idempotency_key: idempotencyKey
-    };
+    const isValidUUID = (val?: string): boolean => 
+      Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
 
-    const { data, error } = await supabase.rpc('create_recurring_series', rpcParams);
-
-    if (error) {
-      throw new Error(translateSupabaseError(error));
-    }
-
-    // Validação rigorosa da estrutura de retorno da RPC antes do consumo
-    if (!data || typeof data !== 'object') {
-      throw new Error('Resposta inválida do servidor ao processar a série recorrente.');
-    }
-
-    const resultData = data as Record<string, any>;
-    const seriesId = String(resultData.series_id || '').trim();
-    const isSeriesUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(seriesId);
-    if (!seriesId || !isSeriesUUID) {
-      throw new Error('Identificador da série (series_id) não retornado ou malformado pelo banco de dados.');
-    }
-
-    const skippedDates: string[] = Array.isArray(resultData.skipped_dates) 
-      ? resultData.skipped_dates.map((s: any) => s.date) 
-      : [];
-    const createdIds: string[] = Array.isArray(resultData.created_booking_ids) 
-      ? resultData.created_booking_ids 
-      : [];
-    const createdCount = Number(resultData.created_count ?? createdIds.length);
-    const requestedCount = Number(resultData.requested_count ?? candidateDates.length);
-
-    // Recupera os registros criados preferencialmente pelos IDs confirmados pela RPC
-    let createdBookings: Booking[] = [];
-    if (createdIds.length > 0) {
+    let professionalId: string | null = isValidUUID(params.userId) ? params.userId : null;
+    if (!professionalId) {
       try {
-        createdBookings = await bookingService.getBookingsByIds(createdIds);
-      } catch (idErr) {
-        console.warn('Aviso ao consultar reservas pelos IDs da RPC:', idErr);
-      }
-
-      // Se retornou parcial, tenta recuperar os IDs faltantes para não apresentar lista incompleta
-      if (createdBookings.length > 0 && createdBookings.length < createdIds.length) {
-        const foundIds = new Set(createdBookings.map(b => b.id));
-        const missingIds = createdIds.filter(id => !foundIds.has(id));
-        if (missingIds.length > 0) {
-          try {
-            const missingBookings = await bookingService.getBookingsByIds(missingIds);
-            createdBookings = [...createdBookings, ...missingBookings];
-          } catch (retryErr) {
-            console.warn('Aviso ao tentar recuperar ocorrências restantes:', retryErr);
-          }
+        const { data: authData } = await supabase.auth.getUser();
+        if (authData?.user?.id && isValidUUID(authData.user.id)) {
+          professionalId = authData.user.id;
         }
-      }
+      } catch {}
+    }
 
-      // Fallback: se ainda estiver incompleto, busca por recurrence_id na consulta geral
-      if (createdBookings.length < createdIds.length) {
-        try {
-          const allBookings = await bookingService.getAllBookings();
-          const seriesFromAll = allBookings.filter(b => b.recurrenceId === seriesId);
-          if (seriesFromAll.length >= createdBookings.length) {
-            createdBookings = seriesFromAll;
-          }
-        } catch (fetchErr) {
-          console.warn('Aviso ao consultar agenda completa para série:', fetchErr);
+    let rpcExecuted = false;
+    let rpcResultData: any = null;
+
+    if (professionalId) {
+      const rpcParams = {
+        p_room_id: params.roomId,
+        p_professional_id: professionalId,
+        p_client_id: effectiveClientId,
+        p_booking_type: params.type || 'HOURLY',
+        p_hour: startHour,
+        p_duration_hours: durationHours,
+        p_period_shift: isPeriod ? (params.periodShift || 'MORNING') : null,
+        p_period_name: isPeriod ? (params.periodName || periodConf?.name || 'Turno') : null,
+        p_recurrence_rule: params.config.frequency,
+        p_dates: candidateDates,
+        p_skip_conflicts: params.skipConflicts,
+        p_notes: params.notes || null,
+        p_idempotency_key: idempotencyKey
+      };
+
+      const { data, error } = await supabase.rpc('create_recurring_series', rpcParams);
+
+      if (!error && data) {
+        rpcExecuted = true;
+        rpcResultData = data;
+      } else if (error) {
+        const errCode = String((error as any).code || '');
+        const errMsg = String((error as any).message || '');
+        const isRpcMissingOrLegacy =
+          errCode === '42883' ||
+          errCode === 'PGRST202' ||
+          errMsg.includes('create_recurring_series') ||
+          errMsg.includes('could not find the function') ||
+          errMsg.includes('digest') ||
+          errMsg.includes('Frequência de recorrência');
+
+        if (!isRpcMissingOrLegacy) {
+          throw new Error(translateSupabaseError(error));
         }
+
+        console.warn('Aviso: RPC create_recurring_series não disponível no banco remoto. Executando contingência segura.', error);
       }
     }
 
-    return {
-      seriesId,
-      createdBookings,
-      skippedDates,
-      createdCount,
-      requestedCount
-    };
+    if (rpcExecuted && rpcResultData && typeof rpcResultData === 'object') {
+      const seriesId = String(rpcResultData.series_id || '').trim();
+      const isSeriesUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(seriesId);
+      if (!seriesId || !isSeriesUUID) {
+        throw new Error('Identificador da série (series_id) não retornado ou malformado pelo banco de dados.');
+      }
+
+      const skippedDates: string[] = Array.isArray(rpcResultData.skipped_dates) 
+        ? rpcResultData.skipped_dates.map((s: any) => s.date) 
+        : [];
+      const createdIds: string[] = Array.isArray(rpcResultData.created_booking_ids) 
+        ? rpcResultData.created_booking_ids 
+        : [];
+      const createdCount = Number(rpcResultData.created_count ?? createdIds.length);
+      const requestedCount = Number(rpcResultData.requested_count ?? candidateDates.length);
+
+      // Recupera os registros criados preferencialmente pelos IDs confirmados pela RPC
+      let createdBookings: Booking[] = [];
+      if (createdIds.length > 0) {
+        try {
+          createdBookings = await bookingService.getBookingsByIds(createdIds);
+        } catch (idErr) {
+          console.warn('Aviso ao consultar reservas pelos IDs da RPC:', idErr);
+        }
+
+        // Se retornou parcial, tenta recuperar os IDs faltantes para não apresentar lista incompleta
+        if (createdBookings.length > 0 && createdBookings.length < createdIds.length) {
+          const foundIds = new Set(createdBookings.map(b => b.id));
+          const missingIds = createdIds.filter(id => !foundIds.has(id));
+          if (missingIds.length > 0) {
+            try {
+              const missingBookings = await bookingService.getBookingsByIds(missingIds);
+              createdBookings = [...createdBookings, ...missingBookings];
+            } catch (retryErr) {
+              console.warn('Aviso ao tentar recuperar ocorrências restantes:', retryErr);
+            }
+          }
+        }
+
+        // Fallback: se ainda estiver incompleto, busca por recurrence_id na consulta geral
+        if (createdBookings.length < createdIds.length) {
+          try {
+            const allBookings = await bookingService.getAllBookings();
+            const seriesFromAll = allBookings.filter(b => b.recurrenceId === seriesId);
+            if (seriesFromAll.length >= createdBookings.length) {
+              createdBookings = seriesFromAll;
+            }
+          } catch (fetchErr) {
+            console.warn('Aviso ao consultar agenda completa para série:', fetchErr);
+          }
+        }
+      }
+
+      return {
+        seriesId,
+        createdBookings,
+        skippedDates,
+        createdCount,
+        requestedCount
+      };
+    }
   }
 
-  // 2. MODO LOCAL / OFFLINE (FALLBACK PARA DESENVOLVIMENTO ISOLADO SEM SUPABASE)
+  // 2. MODO CONTINGÊNCIA / LOCAL (FALLBACK SEGURO COM ROLLBACK COMPENSATÓRIO)
   const preview = await previewRecurringSeries({
     roomId: params.roomId,
     startDate: params.config.startDate,
@@ -482,9 +550,13 @@ export async function createRecurringSeries(params: {
   const validOccurrences = preview.occurrences.filter(o => !o.hasConflict);
   const skippedDates = preview.occurrences.filter(o => o.hasConflict).map(o => o.date);
 
-  const seriesId = (typeof crypto !== 'undefined' && crypto.randomUUID) 
-    ? crypto.randomUUID() 
-    : 'rec-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
+  const seriesId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+    ? crypto.randomUUID()
+    : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === 'x' ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+      });
 
   const createdBookings: Booking[] = [];
 
@@ -514,11 +586,11 @@ export async function createRecurringSeries(params: {
 
       createdBookings.push(created);
     } catch (err: any) {
-      console.warn(`Conflito de concorrência detectado na data ${occ.date}:`, err);
+      console.warn(`Conflito ou erro na data ${occ.date}:`, err);
       if (params.skipConflicts) {
         skippedDates.push(occ.date);
       } else {
-        // Rollback: cancela as que foram criadas até o momento nesta série
+        // Rollback compensatório atômico: cancela reservas já criadas nesta série
         for (const bk of createdBookings) {
           try {
             await bookingService.cancelBooking(bk.id, {
@@ -530,13 +602,13 @@ export async function createRecurringSeries(params: {
           } catch {}
         }
         throw new Error(
-          `Falha de concorrência ao agendar ${occ.date}: ${err.message || 'Horário acabou de ser ocupado'}. A série foi cancelada.`
+          `Falha ao agendar ${occ.date}: ${err.message || 'Horário indisponível'}. A série foi revertida para garantir integridade.`
         );
       }
     }
   }
 
-  // 4. Registro de auditoria da série completa
+  // Registro de auditoria da série completa
   addAuditLog(
     params.userId,
     params.userName,

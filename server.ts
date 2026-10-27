@@ -1,32 +1,144 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
+import { createServer as createViteServer, loadEnv } from 'vite';
 import { createClient } from '@supabase/supabase-js';
+import { validateFullBackupPayload, sanitizeCredentialsDeep } from './scripts/backupValidation';
 
-const PORT = Number(process.env.PORT) || 3000;
+const mode = process.env.NODE_ENV || 'development';
+const envLoaded = loadEnv(mode, process.cwd(), '');
+
+function getEnv(key: string): string {
+  return (process.env[key] || envLoaded[key] || '').trim();
+}
+
+const PORT = Number(process.env.PORT || envLoaded.PORT) || 3000;
 const app = express();
 
 app.use(express.json({ limit: '25mb' }));
 
-// Supabase Admin Client (Service Role)
-const supabaseUrl = 'https://gqpavuqopukyfeyqyrxc.supabase.co';
+export const PRODUCTION_PROJECT_REF = 'gqpavuqopukyfeyqyrxc';
 
-function getSupabaseAdmin() {
-  const serviceKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    (process.env.VITE_SUPABASE_URL?.startsWith('sb_secret_') ? process.env.VITE_SUPABASE_URL : '') ||
-    '';
+function extractProjectRefFromUrl(urlStr: string): string | null {
+  try {
+    const parsed = new URL(urlStr);
+    const hostParts = parsed.hostname.split('.');
+    if (hostParts.length >= 3 && hostParts[1] === 'supabase' && hostParts[2] === 'co') {
+      return hostParts[0].toLowerCase();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
-  if (!serviceKey) {
-    throw new Error('Chave de serviço SUPABASE_SERVICE_ROLE_KEY não configurada no ambiente do servidor.');
+function parseJwtPayloadSafely(token: string): Record<string, any> | null {
+  try {
+    if (!token || typeof token !== 'string') return null;
+    const parts = token.trim().split('.');
+    if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return null;
+    const payloadStr = Buffer.from(parts[1], 'base64url').toString('utf8');
+    const parsed = JSON.parse(payloadStr);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolução e validação estrita das variáveis de ambiente do Supabase.
+ * Precedência de URL: SUPABASE_URL > VITE_SUPABASE_URL
+ * Precedência de chave de serviço: SUPABASE_SERVICE_ROLE_KEY > SUPABASE_SECRET_KEY
+ * Garante que a URL e a chave pertençam ao mesmo projeto e não haja divergência.
+ */
+function getSupabaseConfig() {
+  const url = getEnv('SUPABASE_URL') || getEnv('VITE_SUPABASE_URL');
+  const serviceKey = getEnv('SUPABASE_SERVICE_ROLE_KEY') || getEnv('SUPABASE_SECRET_KEY');
+
+  if (!url) {
+    throw new Error('Configuração ausente: SUPABASE_URL ou VITE_SUPABASE_URL não definida no ambiente.');
   }
 
-  return createClient(supabaseUrl, serviceKey, {
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error('Protocolo inválido');
+    }
+  } catch {
+    throw new Error('Configuração inválida: A URL do Supabase possui formato inválido.');
+  }
+
+  if (!serviceKey) {
+    throw new Error('Configuração ausente: SUPABASE_SERVICE_ROLE_KEY ou SUPABASE_SECRET_KEY não definida no servidor.');
+  }
+
+  const urlRef = extractProjectRefFromUrl(url);
+  const jwtPayload = parseJwtPayloadSafely(serviceKey);
+  if (jwtPayload && urlRef) {
+    const keyRef = String(
+      jwtPayload.ref ||
+      (jwtPayload.iss && String(jwtPayload.iss).replace('supabase-project-', '')) ||
+      ''
+    ).toLowerCase();
+
+    if (keyRef && keyRef !== urlRef) {
+      throw new Error(
+        `Divergência de configuração: A chave de serviço pertence ao projeto '${keyRef}', mas a URL aponta para '${urlRef}'.`
+      );
+    }
+  }
+
+  return { url, serviceKey, projectRef: urlRef };
+}
+
+function getSupabaseAdmin() {
+  const { url, serviceKey } = getSupabaseConfig();
+  return createClient(url, serviceKey, {
     auth: {
       autoRefreshToken: false,
       persistSession: false
     }
   });
+}
+
+const PAGE_SIZE = 1000;
+
+/**
+ * Consulta todos os registros de uma tabela paginando em lotes de PAGE_SIZE,
+ * garantindo ordenação estável por ID e sem retorno silencioso de dados parciais.
+ */
+async function fetchAllTableRecords(
+  supabaseAdmin: any,
+  table: string,
+  orderColumn = 'id'
+): Promise<any[]> {
+  const allRows: any[] = [];
+  let from = 0;
+  let hasMore = true;
+
+  while (hasMore) {
+    const to = from + PAGE_SIZE - 1;
+    const { data, error } = await supabaseAdmin
+      .from(table)
+      .select('*')
+      .order(orderColumn, { ascending: true })
+      .range(from, to);
+
+    if (error) {
+      throw new Error(`Falha ao ler a tabela '${table}': ${error.message || 'Erro desconhecido'}`);
+    }
+
+    const rows = data || [];
+    allRows.push(...rows);
+
+    if (rows.length < PAGE_SIZE) {
+      hasMore = false;
+    } else {
+      from += PAGE_SIZE;
+    }
+  }
+
+  return allRows;
 }
 
 // API Routes
@@ -50,26 +162,37 @@ app.post('/api/admin/reset-password', async (req: Request, res: Response) => {
 
     const supabaseAdmin = getSupabaseAdmin();
 
-    // 1. Validar autenticação do administrador via token Bearer (se fornecido)
+    // 1. Validar autenticação obrigatória do administrador via token Bearer
     const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.split(' ')[1];
-      const { data: callerData, error: callerError } = await supabaseAdmin.auth.getUser(token);
-      if (callerError || !callerData.user) {
-        return res.status(401).json({ error: 'Sessão administrativa inválida ou expirada.' });
-      }
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Não autorizado. Token de autenticação Bearer ausente.' });
+    }
 
-      // Checa se o usuário que está chamando é admin
-      const { data: callerProfile } = await supabaseAdmin
-        .from('profiles')
-        .select('role')
-        .eq('id', callerData.user.id)
-        .maybeSingle();
+    const token = authHeader.slice('Bearer '.length).trim();
+    if (!token) {
+      return res.status(401).json({ error: 'Não autorizado. Token de autenticação vazio ou malformado.' });
+    }
 
-      const isAdmin = callerProfile?.role === 'admin' || callerData.user.email === 'admin@admin.com.br';
-      if (!isAdmin) {
-        return res.status(403).json({ error: 'Permissão negada. Apenas administradores podem alterar senhas.' });
-      }
+    const { data: callerData, error: callerError } = await supabaseAdmin.auth.getUser(token);
+    if (callerError || !callerData?.user) {
+      return res.status(401).json({ error: 'Sessão administrativa inválida ou expirada.' });
+    }
+
+    // Checa se o usuário que está chamando possui perfil estrito com role = 'admin'
+    const { data: callerProfile, error: profileErr } = await supabaseAdmin
+      .from('profiles')
+      .select('role')
+      .eq('id', callerData.user.id)
+      .maybeSingle();
+
+    if (profileErr) {
+      return res.status(500).json({ error: 'Falha ao validar perfil administrativo no banco.' });
+    }
+
+    const roleNormalized = String(callerProfile?.role || '').toLowerCase();
+    const isAdmin = roleNormalized === 'admin';
+    if (!isAdmin) {
+      return res.status(403).json({ error: 'Permissão negada. Apenas administradores podem alterar senhas.' });
     }
 
     // 2. Localizar o usuário de destino por ID ou por E-mail
@@ -355,10 +478,9 @@ const handleAdminBackup = async (req: Request, res: Response) => {
       .eq('id', callerData.user.id)
       .maybeSingle();
 
+    // 3. Verificar autorização administrativa (role = 'admin')
     const roleNormalized = String(callerProfile?.role || '').toLowerCase();
-    const isAdmin =
-      roleNormalized === 'admin' ||
-      callerData.user.email?.toLowerCase() === 'admin@admin.com.br';
+    const isAdmin = roleNormalized === 'admin';
 
     if (!isAdmin) {
       return res.status(403).json({ error: 'Permissão negada. Apenas administradores podem gerar backup do sistema.' });
@@ -368,57 +490,39 @@ const handleAdminBackup = async (req: Request, res: Response) => {
     const mode: 'full' | 'anonymized' =
       rawType === 'anonymized' || rawType === 'anonimizado' ? 'anonymized' : 'full';
 
+    // 4. Consultar todas as 9 tabelas do sistema com paginação completa em lotes de PAGE_SIZE
     const [
-      profilesRes,
-      professionalsRes,
-      clientsRes,
-      roomsRes,
-      bookingsRes,
-      paymentsRes,
-      blockedSlotsRes,
-      settingsRes,
-      auditLogsRes
+      profilesData,
+      professionalsData,
+      clientsData,
+      roomsData,
+      bookingsData,
+      paymentsData,
+      blockedSlotsData,
+      settingsData,
+      auditLogsData
     ] = await Promise.all([
-      supabaseAdmin.from('profiles').select('*').order('created_at', { ascending: true }),
-      supabaseAdmin.from('professionals').select('*').order('created_at', { ascending: true }),
-      supabaseAdmin.from('clients').select('*').order('created_at', { ascending: true }),
-      supabaseAdmin.from('rooms').select('*').order('id', { ascending: true }),
-      supabaseAdmin.from('bookings').select('*').order('booking_date', { ascending: false }),
-      supabaseAdmin.from('payments').select('*').order('created_at', { ascending: false }),
-      supabaseAdmin.from('blocked_slots').select('*').order('blocked_date', { ascending: false }),
-      supabaseAdmin.from('settings').select('*'),
-      supabaseAdmin.from('audit_logs').select('*').order('timestamp', { ascending: false })
+      fetchAllTableRecords(supabaseAdmin, 'profiles', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'professionals', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'clients', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'rooms', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'bookings', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'payments', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'blocked_slots', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'settings', 'id'),
+      fetchAllTableRecords(supabaseAdmin, 'audit_logs', 'id')
     ]);
 
-    const tableErrors = [
-      { table: 'profiles', error: profilesRes.error },
-      { table: 'professionals', error: professionalsRes.error },
-      { table: 'clients', error: clientsRes.error },
-      { table: 'rooms', error: roomsRes.error },
-      { table: 'bookings', error: bookingsRes.error },
-      { table: 'payments', error: paymentsRes.error },
-      { table: 'blocked_slots', error: blockedSlotsRes.error },
-      { table: 'settings', error: settingsRes.error },
-      { table: 'audit_logs', error: auditLogsRes.error }
-    ].filter(item => item.error !== null);
-
-    if (tableErrors.length > 0) {
-      const firstErr = tableErrors[0];
-      return res.status(500).json({
-        error: `Falha ao ler a tabela '${firstErr.table}': ${firstErr.error?.message || 'Erro desconhecido'}`
-      });
-    }
-
     const rawData = {
-      profiles: (profilesRes.data || []).map(sanitizeRecordCredentials),
-      professionals: (professionalsRes.data || []).map(sanitizeRecordCredentials),
-      clients: (clientsRes.data || []).map(sanitizeRecordCredentials),
-      rooms: (roomsRes.data || []).map(sanitizeRecordCredentials),
-      bookings: (bookingsRes.data || []).map(sanitizeRecordCredentials),
-      payments: (paymentsRes.data || []).map(sanitizeRecordCredentials),
-      blocked_slots: (blockedSlotsRes.data || []).map(sanitizeRecordCredentials),
-      settings: (settingsRes.data || []).map(sanitizeRecordCredentials),
-      audit_logs: (auditLogsRes.data || []).map(sanitizeRecordCredentials)
+      profiles: profilesData.map(sanitizeRecordCredentials),
+      professionals: professionalsData.map(sanitizeRecordCredentials),
+      clients: clientsData.map(sanitizeRecordCredentials),
+      rooms: roomsData.map(sanitizeRecordCredentials),
+      bookings: bookingsData.map(sanitizeRecordCredentials),
+      payments: paymentsData.map(sanitizeRecordCredentials),
+      blocked_slots: blockedSlotsData.map(sanitizeRecordCredentials),
+      settings: settingsData.map(sanitizeRecordCredentials),
+      audit_logs: auditLogsData.map(sanitizeRecordCredentials)
     };
 
     const data = mode === 'anonymized' ? anonymizeServerDataset(rawData) : rawData;
@@ -533,44 +637,13 @@ function detectServerAnonymizedPayload(backup: any): { isAnonymized: boolean; re
   return { isAnonymized: false };
 }
 
-function validateServerFullBackupPayload(backup: any): { valid: boolean; error?: string } {
-  if (!backup || typeof backup !== 'object') {
-    return { valid: false, error: 'O conteúdo enviado não é um objeto JSON válido.' };
-  }
-
-  if (!backup.metadata || typeof backup.metadata !== 'object') {
-    return { valid: false, error: 'Arquivo inválido: bloco "metadata" ausente.' };
-  }
-
-  if (backup.metadata.system !== 'LocaPsico') {
-    return {
-      valid: false,
-      error: `Arquivo incompatível: o sistema de origem ("${backup.metadata.system || 'desconhecido'}") não é o LocaPsico.`
-    };
-  }
-
-  const anonCheck = detectServerAnonymizedPayload(backup);
-  if (anonCheck.isAnonymized) {
-    return {
-      valid: false,
-      error: `Operação bloqueada: Não é permitido restaurar um Backup Anonimizado. ${anonCheck.reason || ''} Utilize exclusivamente um arquivo de Backup Completo.`
-    };
-  }
-
-  if (!backup.data || typeof backup.data !== 'object') {
-    return { valid: false, error: 'Arquivo inválido: bloco "data" ausente.' };
-  }
-
-  for (const table of REQUIRED_BACKUP_TABLES) {
-    if (!Array.isArray(backup.data[table])) {
-      return {
-        valid: false,
-        error: `Estrutura de backup incompleta: a tabela "${table}" está ausente ou não é uma lista válida.`
-      };
-    }
-  }
-
-  return { valid: true };
+function validateServerFullBackupPayload(backup: any): { valid: boolean; error?: string; errors?: string[] } {
+  const result = validateFullBackupPayload(backup);
+  return {
+    valid: result.valid,
+    error: result.error,
+    errors: result.errors
+  };
 }
 
 /**
@@ -606,9 +679,7 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
       .maybeSingle();
 
     const roleNormalized = String(callerProfile?.role || '').toLowerCase();
-    const isAdmin =
-      roleNormalized === 'admin' ||
-      callerAdminEmail === 'admin@admin.com.br';
+    const isAdmin = roleNormalized === 'admin';
 
     if (!isAdmin) {
       return res.status(403).json({ error: 'Permissão negada. Apenas administradores podem restaurar backups do sistema.' });
@@ -625,7 +696,15 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
       return res.status(400).json({ error: validation.error || 'Arquivo de backup inválido para restauração.' });
     }
 
-    // Snapshot em memória pré-restauração para rollback automático em caso de erro
+    // Bloqueio rigoroso de segurança: impede restauração destrutiva no projeto de produção
+    const { projectRef } = getSupabaseConfig();
+    if (projectRef === PRODUCTION_PROJECT_REF) {
+      return res.status(403).json({
+        error: `[BLOQUEIO DE SEGURANÇA] Restauração abortada: Operações administrativas destrutivas são terminantemente proibidas contra o projeto de PRODUÇÃO (${PRODUCTION_PROJECT_REF}).`
+      });
+    }
+
+    // Snapshot em memória pré-restauração para contingência/fallback
     const [
       currProfilesRes,
       currProfessionalsRes,
@@ -657,12 +736,48 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
       settings: currSettingsRes.data || []
     };
 
+    // Rastreamento estrito de contas Auth recém-criadas nesta execução para compensação isolada
+    const newlyCreatedAuthUserIds: string[] = [];
+
+    const rollbackCreatedAuthUsers = async () => {
+      if (newlyCreatedAuthUserIds.length > 0) {
+        console.warn(`[RESTORE COMPENSAÇÃO] Removendo ${newlyCreatedAuthUserIds.length} contas Auth criadas nesta sessão...`);
+        const cleanupResults = await Promise.allSettled(
+          newlyCreatedAuthUserIds.map(uid => supabaseAdmin.auth.admin.deleteUser(uid))
+        );
+        const failedCleanups = cleanupResults.filter(r => r.status === 'rejected');
+        if (failedCleanups.length > 0) {
+          console.error(`[RESTORE COMPENSAÇÃO] Falha ao excluir ${failedCleanups.length} contas Auth temporárias:`, failedCleanups);
+        }
+      }
+    };
+
     try {
-      const { data: authListRes } = await supabaseAdmin.auth.admin.listUsers({
-        page: 1,
-        perPage: 1000
-      });
-      const existingAuthUsers = authListRes?.users || [];
+      // 6. Mapear usuários existentes no Supabase Auth com paginação completa
+      const existingAuthUsers: any[] = [];
+      let authPage = 1;
+      let hasMoreAuth = true;
+
+      while (hasMoreAuth) {
+        const { data: authListRes, error: authListErr } = await supabaseAdmin.auth.admin.listUsers({
+          page: authPage,
+          perPage: 1000
+        });
+
+        if (authListErr) {
+          throw new Error(`Falha ao listar usuários do Supabase Auth: ${authListErr.message}`);
+        }
+
+        const pageUsers = authListRes?.users || [];
+        existingAuthUsers.push(...pageUsers);
+
+        if (pageUsers.length < 1000) {
+          hasMoreAuth = false;
+        } else {
+          authPage++;
+        }
+      }
+
       const authUsersById = new Map<string, any>();
       const authUsersByEmail = new Map<string, any>();
 
@@ -673,15 +788,15 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
         }
       }
 
-      const rawProfiles = (backupPayload.data.profiles || []).map(sanitizeRecordCredentials);
-      const rawProfessionals = (backupPayload.data.professionals || []).map(sanitizeRecordCredentials);
-      const rawClients = (backupPayload.data.clients || []).map(sanitizeRecordCredentials);
-      const rawRooms = (backupPayload.data.rooms || []).map(sanitizeRecordCredentials);
-      const rawBookings = (backupPayload.data.bookings || []).map(sanitizeRecordCredentials);
-      const rawPayments = (backupPayload.data.payments || []).map(sanitizeRecordCredentials);
-      const rawBlockedSlots = (backupPayload.data.blocked_slots || []).map(sanitizeRecordCredentials);
-      const rawSettings = (backupPayload.data.settings || []).map(sanitizeRecordCredentials);
-      const rawAuditLogs = (backupPayload.data.audit_logs || []).map(sanitizeRecordCredentials);
+      const rawProfiles = (backupPayload.data.profiles || []).map(sanitizeCredentialsDeep);
+      const rawProfessionals = (backupPayload.data.professionals || []).map(sanitizeCredentialsDeep);
+      const rawClients = (backupPayload.data.clients || []).map(sanitizeCredentialsDeep);
+      const rawRooms = (backupPayload.data.rooms || []).map(sanitizeCredentialsDeep);
+      const rawBookings = (backupPayload.data.bookings || []).map(sanitizeCredentialsDeep);
+      const rawPayments = (backupPayload.data.payments || []).map(sanitizeCredentialsDeep);
+      const rawBlockedSlots = (backupPayload.data.blocked_slots || []).map(sanitizeCredentialsDeep);
+      const rawSettings = (backupPayload.data.settings || []).map(sanitizeCredentialsDeep);
+      const rawAuditLogs = (backupPayload.data.audit_logs || []).map(sanitizeCredentialsDeep);
 
       const profileIdMap = new Map<string, string>();
       const profilesToUpsertMap = new Map<string, any>();
@@ -709,6 +824,7 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
         }
 
         if (authUsersById.has(String(p.id))) {
+          // Usuário já existe por ID: preserva id e credenciais intactas (não altera senha)
           profileIdMap.set(String(p.id), String(p.id));
           profilesToUpsertMap.set(String(p.id), {
             ...p,
@@ -716,6 +832,7 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
             status: p.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE'
           });
         } else if (pEmail && authUsersByEmail.has(pEmail)) {
+          // Usuário já existe por email: remapeia para o ID existente sem tocar em senhas
           const matchedAuth = authUsersByEmail.get(pEmail);
           profileIdMap.set(String(p.id), String(matchedAuth.id));
           profilesToUpsertMap.set(String(matchedAuth.id), {
@@ -725,6 +842,7 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
             status: p.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE'
           });
         } else if (pEmail) {
+          // Usuário novo: provisiona conta com senha temporária aleatória e rastreia o ID para rollback
           const tempPassword = `LocaPsico#${Math.random().toString(36).slice(-6)}9A!`;
           const { data: createdAuth, error: createAuthErr } = await supabaseAdmin.auth.admin.createUser({
             id: String(p.id),
@@ -739,18 +857,24 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
             }
           });
 
-          if (!createAuthErr && createdAuth?.user) {
-            const finalId = String(createdAuth.user.id);
-            profileIdMap.set(String(p.id), finalId);
-            authUsersById.set(finalId, createdAuth.user);
-            authUsersByEmail.set(pEmail, createdAuth.user);
-            profilesToUpsertMap.set(finalId, {
-              ...p,
-              id: finalId,
-              role: 'professional',
-              status: p.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE'
+          if (createAuthErr || !createdAuth?.user) {
+            await rollbackCreatedAuthUsers();
+            return res.status(500).json({
+              error: `Falha ao provisionar usuário ${pEmail} no Supabase Auth: ${createAuthErr?.message || 'Erro desconhecido'}`
             });
           }
+
+          const finalId = String(createdAuth.user.id);
+          newlyCreatedAuthUserIds.push(finalId);
+          profileIdMap.set(String(p.id), finalId);
+          authUsersById.set(finalId, createdAuth.user);
+          authUsersByEmail.set(pEmail, createdAuth.user);
+          profilesToUpsertMap.set(finalId, {
+            ...p,
+            id: finalId,
+            role: 'professional',
+            status: p.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE'
+          });
         }
       }
 
@@ -874,6 +998,59 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
           user_id: resolveProfileId(log.user_id)
         }));
 
+      const preparedBackupData = {
+        profiles: Array.from(profilesToUpsertMap.values()),
+        professionals: Array.from(professionalsByUserId.values()),
+        clients: clientsToUpsert,
+        rooms: roomsToUpsert,
+        bookings: bookingsToUpsert,
+        payments: paymentsToUpsert,
+        blocked_slots: blockedSlotsToUpsert,
+        settings: settingsToUpsert,
+        audit_logs: auditLogsToUpsert
+      };
+
+      // 7. TENTATIVA DE RESTAURAÇÃO ATÔMICA VIA RPC POSTGRESQL (execute_admin_full_restore)
+      const { data: rpcResult, error: rpcError } = await supabaseAdmin.rpc('execute_admin_full_restore', {
+        p_backup_data: preparedBackupData,
+        p_caller_admin_id: callerAdminId
+      });
+
+      if (!rpcError && rpcResult?.success) {
+        console.log(`[RESTORE ATÔMICO] Sucesso! Registros restaurados: ${rpcResult.total_records}`);
+        return res.json({
+          success: true,
+          message: 'Backup Completo restaurado com sucesso e atomicidade garantida no PostgreSQL!',
+          restoredAt: rpcResult.restored_at || new Date().toISOString(),
+          restoredBy: {
+            id: callerAdminId,
+            email: callerAdminEmail,
+            name: callerProfile?.full_name || 'Administrador'
+          },
+          totalRestored: rpcResult.total_records,
+          counts: rpcResult.counts
+        });
+      }
+
+      // Se a RPC falhou por erro de constraint ou outro erro do banco (e não por ausência da função)
+      const isRpcMissing =
+        rpcError?.code === '42883' ||
+        (String(rpcError?.message || '').toLowerCase().includes('execute_admin_full_restore') &&
+         String(rpcError?.message || '').toLowerCase().includes('does not exist'));
+
+      if (!isRpcMissing) {
+        // Falha transacional: o PostgreSQL fez rollback total de 100% das alterações no banco
+        // Executa compensação isolada das contas Auth criadas
+        await rollbackCreatedAuthUsers();
+        console.error('[RESTORE ATÔMICO] Falha na transação PostgreSQL (rollback automático executado):', rpcError);
+        return res.status(500).json({
+          error: `Falha na restauração atômica do banco de dados (todas as tabelas foram preservadas via rollback): ${rpcError?.message || 'Erro inesperado'}`
+        });
+      }
+
+      // Caso a RPC ainda não esteja instalada no ambiente específico, executa fallback cliente seguro
+      console.warn('[RESTORE] RPC execute_admin_full_restore não encontrada no banco. Executando fallback controlado...');
+
       // Limpeza ordenada (filhas -> mães)
       await supabaseAdmin.from('payments').delete().not('id', 'is', null);
       await supabaseAdmin.from('bookings').delete().not('id', 'is', null);
@@ -906,6 +1083,7 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
       }
 
       // 2. rooms
+      let restoredRoomsCount = 0;
       for (const r of roomsToUpsert) {
         const { error: rErr } = await supabaseAdmin.from('rooms').upsert(r, { onConflict: 'id' });
         if (rErr) {
@@ -913,8 +1091,14 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
           delete fallbackRoom.morning_rate;
           delete fallbackRoom.afternoon_rate;
           delete fallbackRoom.night_rate;
-          await supabaseAdmin.from('rooms').upsert(fallbackRoom, { onConflict: 'id' });
+          const { error: fbErr } = await supabaseAdmin.from('rooms').upsert(fallbackRoom, { onConflict: 'id' });
+          if (!fbErr) restoredRoomsCount++;
+        } else {
+          restoredRoomsCount++;
         }
+      }
+      if (roomsToUpsert.length > 0 && restoredRoomsCount < roomsToUpsert.length) {
+        throw new Error(`Erro ao restaurar 'rooms': apenas ${restoredRoomsCount} de ${roomsToUpsert.length} salas foram salvas.`);
       }
 
       // 3. profiles
@@ -943,7 +1127,7 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
         if (clientsErr) throw new Error(`Erro ao restaurar 'clients': ${clientsErr.message}`);
       }
 
-      // 6. bookings (antes de blocked_slots)
+      // 6. bookings
       let restoredBookingsCount = 0;
       if (bookingsToUpsert.length > 0) {
         const { error: batchBookErr } = await supabaseAdmin
@@ -966,6 +1150,9 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
             }
           }
         }
+      }
+      if (bookingsToUpsert.length > 0 && restoredBookingsCount < bookingsToUpsert.length) {
+        throw new Error(`Erro ao restaurar 'bookings': apenas ${restoredBookingsCount} de ${bookingsToUpsert.length} agendamentos foram salvos.`);
       }
 
       // 7. blocked_slots
@@ -993,7 +1180,7 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
         user_id: callerAdminId,
         user_name: callerProfile?.full_name || 'Administrador',
         action: 'Restauração de Backup Completo',
-        details: `Backup Completo (gerado em ${backupPayload.metadata.generatedAt || 'data não informada'}) restaurado com sucesso pelo administrador.`,
+        details: `Backup Completo restaurado via procedimento de contingência.`,
         timestamp: new Date().toISOString()
       });
 
@@ -1024,32 +1211,53 @@ app.post('/api/admin/restore', async (req: Request, res: Response) => {
         counts: restoredCounts
       });
     } catch (innerErr: any) {
+      // Falha no fallback: aciona compensação de Auth e reinserção do snapshot
+      await rollbackCreatedAuthUsers();
+      let rollbackFailureReason: string | null = null;
       try {
         if (preRestoreSnapshot.settings.length > 0) {
-          await supabaseAdmin.from('settings').upsert(preRestoreSnapshot.settings, { onConflict: 'id' });
+          const { error: sErr } = await supabaseAdmin.from('settings').upsert(preRestoreSnapshot.settings, { onConflict: 'id' });
+          if (sErr) throw new Error(`Falha ao restaurar settings: ${sErr.message}`);
         }
         if (preRestoreSnapshot.rooms.length > 0) {
-          await supabaseAdmin.from('rooms').upsert(preRestoreSnapshot.rooms, { onConflict: 'id' });
+          for (const r of preRestoreSnapshot.rooms) {
+            const { error: rErr } = await supabaseAdmin.from('rooms').upsert(r, { onConflict: 'id' });
+            if (rErr) throw new Error(`Falha ao restaurar rooms: ${rErr.message}`);
+          }
         }
         if (preRestoreSnapshot.profiles.length > 0) {
-          await supabaseAdmin.from('profiles').upsert(preRestoreSnapshot.profiles, { onConflict: 'id' });
+          const { error: pErr } = await supabaseAdmin.from('profiles').upsert(preRestoreSnapshot.profiles, { onConflict: 'id' });
+          if (pErr) throw new Error(`Falha ao restaurar profiles: ${pErr.message}`);
         }
         if (preRestoreSnapshot.professionals.length > 0) {
-          await supabaseAdmin.from('professionals').upsert(preRestoreSnapshot.professionals, { onConflict: 'user_id' });
+          const { error: prErr } = await supabaseAdmin.from('professionals').upsert(preRestoreSnapshot.professionals, { onConflict: 'user_id' });
+          if (prErr) throw new Error(`Falha ao restaurar professionals: ${prErr.message}`);
         }
         if (preRestoreSnapshot.clients.length > 0) {
-          await supabaseAdmin.from('clients').upsert(preRestoreSnapshot.clients, { onConflict: 'id' });
+          const { error: cErr } = await supabaseAdmin.from('clients').upsert(preRestoreSnapshot.clients, { onConflict: 'id' });
+          if (cErr) throw new Error(`Falha ao restaurar clients: ${cErr.message}`);
         }
         if (preRestoreSnapshot.bookings.length > 0) {
-          await supabaseAdmin.from('bookings').upsert(preRestoreSnapshot.bookings, { onConflict: 'id' });
+          const { error: bErr } = await supabaseAdmin.from('bookings').upsert(preRestoreSnapshot.bookings, { onConflict: 'id' });
+          if (bErr) throw new Error(`Falha ao restaurar bookings: ${bErr.message}`);
         }
         if (preRestoreSnapshot.blocked_slots.length > 0) {
-          await supabaseAdmin.from('blocked_slots').upsert(preRestoreSnapshot.blocked_slots, { onConflict: 'id' });
+          const { error: blErr } = await supabaseAdmin.from('blocked_slots').upsert(preRestoreSnapshot.blocked_slots, { onConflict: 'id' });
+          if (blErr) throw new Error(`Falha ao restaurar blocked_slots: ${blErr.message}`);
         }
         if (preRestoreSnapshot.payments.length > 0) {
-          await supabaseAdmin.from('payments').upsert(preRestoreSnapshot.payments, { onConflict: 'id' });
+          const { error: payErr } = await supabaseAdmin.from('payments').upsert(preRestoreSnapshot.payments, { onConflict: 'id' });
+          if (payErr) throw new Error(`Falha ao restaurar payments: ${payErr.message}`);
         }
-      } catch {}
+      } catch (rbErr: any) {
+        rollbackFailureReason = rbErr?.message || 'Erro durante execução do rollback.';
+      }
+
+      if (rollbackFailureReason) {
+        return res.status(500).json({
+          error: `Falha crítica durante a restauração e falha no rollback: não é possível garantir a recuperação integral do estado anterior. Motivo do rollback: ${rollbackFailureReason}. Erro original: ${innerErr?.message || 'Erro inesperado'}`
+        });
+      }
 
       return res.status(500).json({
         error: `Falha durante a restauração (estado anterior preservado): ${innerErr?.message || 'Erro inesperado'}`
