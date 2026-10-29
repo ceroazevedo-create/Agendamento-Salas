@@ -1,4 +1,4 @@
--- ==============================================================================
+ -- ==============================================================================
 -- LOCAPSICO - MIGRATION 20261027000000: RECORRÊNCIA DE RESERVAS EM PRODUÇÃO COM ROLLBACK SEGURO
 -- Arquivo: supabase/migrations/20261027000000_recurring_bookings_production_ready.sql
 -- ==============================================================================
@@ -31,12 +31,9 @@ ALTER TABLE public.rooms ADD COLUMN IF NOT EXISTS morning_rate NUMERIC(10,2);
 ALTER TABLE public.rooms ADD COLUMN IF NOT EXISTS afternoon_rate NUMERIC(10,2);
 ALTER TABLE public.rooms ADD COLUMN IF NOT EXISTS night_rate NUMERIC(10,2);
 
--- Preenche apenas registros que estejam com tarifas nulas, usando as tarifas de referência da homologação
-UPDATE public.rooms SET 
-  morning_rate = COALESCE(morning_rate, 150.00),
-  afternoon_rate = COALESCE(afternoon_rate, 180.00),
-  night_rate = COALESCE(night_rate, 130.00)
-WHERE morning_rate IS NULL OR afternoon_rate IS NULL OR night_rate IS NULL;
+-- IMPORTANTE: não preencher tarifas nulas com padrões da interface.
+-- As tarifas por turno devem ser gravadas explicitamente pelo administrador após
+-- a aplicação desta migração. A função de recorrência rejeita turnos sem tarifa persistida.
 
 -- 4. TABELA DE IDEMPOTÊNCIA PARA AGENDAMENTOS
 CREATE TABLE IF NOT EXISTS public.booking_idempotency_keys (
@@ -79,14 +76,14 @@ SECURITY DEFINER
 SET search_path = public, extensions, pg_temp
 AS $$
 BEGIN
-  -- 1. Regra Fundamental: Domingo fechado (DOW: 0 = Domingo)
-  IF EXTRACT(DOW FROM NEW.booking_date) = 0 THEN
-    RAISE EXCEPTION 'As salas não são utilizadas aos domingos.' USING ERRCODE = '22000';
-  END IF;
-
-  -- 2. Reservas canceladas não geram conflito nem bloqueiam disponibilidade
+  -- 1. Reservas canceladas não ocupam horário; permitir inclusive cancelar reserva em domingo.
   IF NEW.payment_status = 'CANCELLED' OR NEW.status = 'cancelled' THEN
     RETURN NEW;
+  END IF;
+
+  -- 2. Domingo fechado para reservas ativas (DOW: 0 = Domingo).
+  IF EXTRACT(DOW FROM NEW.booking_date) = 0 THEN
+    RAISE EXCEPTION 'As salas não são utilizadas aos domingos.' USING ERRCODE = '22000';
   END IF;
 
   -- 3. Detecção de UPDATE neutro (nenhum campo de agenda alterado)
@@ -94,8 +91,9 @@ BEGIN
     IF OLD.room_id = NEW.room_id 
        AND OLD.booking_date = NEW.booking_date 
        AND OLD.start_time = NEW.start_time 
-       AND OLD.end_time = NEW.end_time 
-       AND OLD.payment_status = NEW.payment_status 
+       AND OLD.end_time = NEW.end_time
+       AND OLD.booking_type = NEW.booking_type
+       AND OLD.payment_status = NEW.payment_status
        AND OLD.status = NEW.status THEN
       RETURN NEW;
     END IF;
@@ -158,39 +156,63 @@ CREATE OR REPLACE FUNCTION public.acquire_room_date_locks(p_items JSONB)
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, extensions, pg_temp
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   r RECORD;
-  v_date_int INTEGER;
+  v_lock_key BIGINT;
 BEGIN
+  IF p_items IS NULL OR jsonb_typeof(p_items) <> 'array' THEN
+    RAISE EXCEPTION 'Lista de locks inválida.' USING ERRCODE = '22000';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(p_items) AS e(elem)
+    WHERE jsonb_typeof(e.elem) <> 'object'
+       OR NULLIF(BTRIM(e.elem->>'room_id'), '') IS NULL
+       OR NULLIF(BTRIM(e.elem->>'date'), '') IS NULL
+  ) THEN
+    RAISE EXCEPTION 'Item de lock inválido.' USING ERRCODE = '22000';
+  END IF;
+
+  -- Primeiro, locks globais por data em ordem determinística.
+  -- Reservas de sala específica usam lock compartilhado; ALL usa exclusivo.
   FOR r IN
-    WITH raw_slots AS (
-      SELECT 
-        elem->>'room_id' AS r_id,
-        (elem->>'date')::DATE AS s_date
-      FROM jsonb_array_elements(p_items) AS elem
-      WHERE elem->>'room_id' IS NOT NULL AND elem->>'date' IS NOT NULL
-    ),
-    expanded_slots AS (
-      SELECT 
-        CASE WHEN raw.r_id = 'ALL' THEN rm.id ELSE raw.r_id END AS room_id,
-        raw.s_date AS slot_date
-      FROM raw_slots raw
-      LEFT JOIN public.rooms rm ON raw.r_id = 'ALL'
-    ),
-    canonical_order AS (
-      SELECT DISTINCT room_id, slot_date
-      FROM expanded_slots
-      WHERE room_id IS NOT NULL AND slot_date IS NOT NULL
-      ORDER BY room_id ASC, slot_date ASC
-    )
-    SELECT room_id, slot_date FROM canonical_order
+    SELECT
+      (e.elem->>'date')::date AS slot_date,
+      BOOL_OR(e.elem->>'room_id' = 'ALL') AS has_all
+    FROM jsonb_array_elements(p_items) AS e(elem)
+    GROUP BY (e.elem->>'date')::date
+    ORDER BY (e.elem->>'date')::date
   LOOP
-    v_date_int := (EXTRACT(YEAR FROM r.slot_date)::integer * 10000) 
-                + (EXTRACT(MONTH FROM r.slot_date)::integer * 100) 
-                + (EXTRACT(DAY FROM r.slot_date)::integer);
-    PERFORM pg_advisory_xact_lock(hashtext(r.room_id), v_date_int);
+    v_lock_key := hashtextextended(
+      'room-date-global:' || TO_CHAR(r.slot_date, 'YYYY-MM-DD'), 0
+    );
+
+    IF r.has_all THEN
+      PERFORM pg_advisory_xact_lock(v_lock_key);
+    ELSE
+      PERFORM pg_advisory_xact_lock_shared(v_lock_key);
+    END IF;
+  END LOOP;
+
+  -- Depois, locks exclusivos por sala/data, sempre ordenados.
+  -- ALL é protegido pelo lock global exclusivo da data.
+  FOR r IN
+    SELECT DISTINCT
+      e.elem->>'room_id' AS room_id,
+      (e.elem->>'date')::date AS slot_date
+    FROM jsonb_array_elements(p_items) AS e(elem)
+    WHERE e.elem->>'room_id' <> 'ALL'
+    ORDER BY room_id, slot_date
+  LOOP
+    v_lock_key := hashtextextended(
+      'room-date:' ||
+      jsonb_build_array(r.room_id, TO_CHAR(r.slot_date, 'YYYY-MM-DD'))::text,
+      0
+    );
+    PERFORM pg_advisory_xact_lock(v_lock_key);
   END LOOP;
 END;
 $$;
@@ -207,6 +229,100 @@ BEGIN
   );
 END;
 $$;
+
+-- 6.1 LOCKS PARA TODAS AS ROTAS DE RESERVA E BLOQUEIO
+-- O trigger trg_00_* executa antes de check_booking_conflict.
+CREATE OR REPLACE FUNCTION public.lock_booking_room_date_before_conflict()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_items JSONB;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    v_items := jsonb_build_array(
+      jsonb_build_object('room_id', OLD.room_id, 'date', TO_CHAR(OLD.booking_date, 'YYYY-MM-DD')),
+      jsonb_build_object('room_id', NEW.room_id, 'date', TO_CHAR(NEW.booking_date, 'YYYY-MM-DD'))
+    );
+  ELSE
+    v_items := jsonb_build_array(
+      jsonb_build_object('room_id', NEW.room_id, 'date', TO_CHAR(NEW.booking_date, 'YYYY-MM-DD'))
+    );
+  END IF;
+
+  PERFORM public.acquire_room_date_locks(v_items);
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_00_lock_booking_conflict ON public.bookings;
+CREATE TRIGGER trg_00_lock_booking_conflict
+BEFORE INSERT OR UPDATE OF room_id, booking_date, start_time, end_time, booking_type, payment_status, status
+ON public.bookings
+FOR EACH ROW
+EXECUTE FUNCTION public.lock_booking_room_date_before_conflict();
+
+CREATE OR REPLACE FUNCTION public.check_blocked_slot_conflict_with_lock()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_items JSONB;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    v_items := jsonb_build_array(
+      jsonb_build_object('room_id', OLD.room_id, 'date', TO_CHAR(OLD.blocked_date, 'YYYY-MM-DD')),
+      jsonb_build_object('room_id', NEW.room_id, 'date', TO_CHAR(NEW.blocked_date, 'YYYY-MM-DD'))
+    );
+  ELSE
+    v_items := jsonb_build_array(
+      jsonb_build_object('room_id', NEW.room_id, 'date', TO_CHAR(NEW.blocked_date, 'YYYY-MM-DD'))
+    );
+  END IF;
+
+  PERFORM public.acquire_room_date_locks(v_items);
+
+  -- Bloqueios administrativos não podem se sobrepor entre si.
+  IF EXISTS (
+    SELECT 1
+    FROM public.blocked_slots bs
+    WHERE bs.id IS DISTINCT FROM NEW.id
+      AND bs.blocked_date = NEW.blocked_date
+      AND (bs.room_id = 'ALL' OR NEW.room_id = 'ALL' OR bs.room_id = NEW.room_id)
+      AND GREATEST(bs.start_time, NEW.start_time) < LEAST(bs.end_time, NEW.end_time)
+  ) THEN
+    RAISE EXCEPTION 'Não é possível criar o bloqueio: existe outro bloqueio administrativo sobreposto.'
+      USING ERRCODE = '23P01';
+  END IF;
+
+  -- Bloqueio administrativo não pode sobrepor reserva ativa.
+  IF EXISTS (
+    SELECT 1
+    FROM public.bookings b
+    WHERE (NEW.room_id = 'ALL' OR b.room_id = NEW.room_id)
+      AND b.booking_date = NEW.blocked_date
+      AND b.payment_status <> 'CANCELLED'
+      AND b.status <> 'cancelled'
+      AND GREATEST(b.start_time, NEW.start_time) < LEAST(b.end_time, NEW.end_time)
+  ) THEN
+    RAISE EXCEPTION 'Não é possível criar o bloqueio: existe uma reserva ativa nesse horário.'
+      USING ERRCODE = '23P01';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_00_check_blocked_slot_conflict ON public.blocked_slots;
+CREATE TRIGGER trg_00_check_blocked_slot_conflict
+BEFORE INSERT OR UPDATE OF room_id, blocked_date, start_time, end_time
+ON public.blocked_slots
+FOR EACH ROW
+EXECUTE FUNCTION public.check_blocked_slot_conflict_with_lock();
 
 -- 7. RPC TRANSACIONAL: public.create_recurring_series
 CREATE OR REPLACE FUNCTION public.create_recurring_series(
@@ -231,6 +347,8 @@ SET search_path = public, extensions, pg_temp
 AS $$
 DECLARE
   v_caller_id UUID;
+  v_caller_role TEXT;
+  v_caller_status TEXT;
   v_room RECORD;
   v_sorted_dates DATE[];
   v_cur_date DATE;
@@ -282,16 +400,33 @@ BEGIN
     END IF;
   END IF;
 
-  IF NOT EXISTS (SELECT 1 FROM public.profiles WHERE id = p_professional_id) THEN
-    RAISE EXCEPTION 'Profissional com ID % não encontrado.', p_professional_id USING ERRCODE = '22000';
+  IF NOT EXISTS (
+    SELECT 1 FROM public.profiles
+    WHERE id = p_professional_id
+      AND status = 'ACTIVE'
+      AND lower(role) IN ('professional', 'admin')
+  ) THEN
+    RAISE EXCEPTION 'Profissional inexistente, inativo ou sem papel autorizado.'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT lower(role), status
+    INTO v_caller_role, v_caller_status
+  FROM public.profiles
+  WHERE id = v_caller_id;
+
+  IF NOT FOUND
+     OR v_caller_status IS DISTINCT FROM 'ACTIVE'
+     OR v_caller_role IS NULL
+     OR v_caller_role NOT IN ('professional', 'admin') THEN
+    RAISE EXCEPTION 'Usuário sem perfil ativo ou sem permissão para agendar.'
+      USING ERRCODE = '42501';
   END IF;
 
   IF v_caller_id <> p_professional_id THEN
-    IF NOT EXISTS (
-      SELECT 1 FROM public.profiles 
-      WHERE id = v_caller_id AND (role = 'admin' OR role = 'ADMIN')
-    ) THEN
-      RAISE EXCEPTION 'Permissão negada: agendamento permitido apenas para o próprio perfil ou por administradores.' USING ERRCODE = '42501';
+    IF v_caller_role <> 'admin' THEN
+      RAISE EXCEPTION 'Permissão negada: profissionais só podem agendar para si.'
+        USING ERRCODE = '42501';
     END IF;
   END IF;
 
@@ -317,8 +452,9 @@ BEGIN
     RAISE EXCEPTION 'A sala % está em manutenção e indisponível para reservas.', p_room_id USING ERRCODE = '22000';
   END IF;
 
+
   -- 7.4 VALIDAÇÕES ESTRITAS DE PARÂMETROS
-  IF p_booking_type NOT IN ('HOURLY', 'PERIOD') THEN
+  IF p_booking_type IS NULL OR p_booking_type NOT IN ('HOURLY', 'PERIOD') THEN
     RAISE EXCEPTION 'Modalidade de agendamento inválida: %. Permitidas: HOURLY, PERIOD.', p_booking_type USING ERRCODE = '22000';
   END IF;
 
@@ -336,7 +472,21 @@ BEGIN
     END IF;
   END IF;
 
-  IF p_recurrence_rule NOT IN ('DAILY', 'WEEKLY', 'BIWEEKLY', 'MONTHLY') THEN
+  -- Não usar valores padrão da interface como se estivessem persistidos no banco.
+  -- O administrador precisa salvar as tarifas por turno após as colunas serem criadas.
+  IF p_booking_type = 'PERIOD' THEN
+    IF p_period_shift = 'MORNING' AND v_room.morning_rate IS NULL THEN
+      RAISE EXCEPTION 'A tarifa de manhã ainda não está cadastrada para a sala %. Peça ao administrador para salvar as tarifas.', p_room_id USING ERRCODE = '22000';
+    ELSIF p_period_shift = 'AFTERNOON' AND v_room.afternoon_rate IS NULL THEN
+      RAISE EXCEPTION 'A tarifa da tarde ainda não está cadastrada para a sala %. Peça ao administrador para salvar as tarifas.', p_room_id USING ERRCODE = '22000';
+    ELSIF p_period_shift = 'NIGHT' AND v_room.night_rate IS NULL THEN
+      RAISE EXCEPTION 'A tarifa da noite ainda não está cadastrada para a sala %. Peça ao administrador para salvar as tarifas.', p_room_id USING ERRCODE = '22000';
+    ELSIF p_period_shift = 'FULL_DAY' AND v_room.period_rate IS NULL THEN
+      RAISE EXCEPTION 'A tarifa integral ainda não está cadastrada para a sala %.', p_room_id USING ERRCODE = '22000';
+    END IF;
+  END IF;
+
+  IF p_recurrence_rule IS NULL OR p_recurrence_rule NOT IN ('DAILY', 'WEEKLY', 'BIWEEKLY', 'MONTHLY') THEN
     RAISE EXCEPTION 'Frequência de recorrência inválida: %. Permitidas: DAILY, WEEKLY, BIWEEKLY, MONTHLY.', p_recurrence_rule USING ERRCODE = '22000';
   END IF;
 
@@ -367,7 +517,8 @@ BEGIN
     'duration_hours', p_duration_hours,
     'hour', p_hour,
     'notes', COALESCE(p_notes, ''),
-    'period_name', COALESCE(p_period_name, ''),
+    'period_name', COALESCE(p_period_shift, ''),
+    'display_period_name', COALESCE(NULLIF(trim(p_period_name), ''), ''),
     'period_shift', COALESCE(p_period_shift, ''),
     'professional_id', p_professional_id,
     'recurrence_rule', p_recurrence_rule,
@@ -398,7 +549,7 @@ BEGIN
       ELSIF v_idem.status = 'PROCESSING' THEN
         IF (now() - v_idem.updated_at) > INTERVAL '2 minutes' THEN
           UPDATE public.booking_idempotency_keys
-          SET updated_at = now()
+          SET status = 'PROCESSING', updated_at = now()
           WHERE key = p_idempotency_key;
         ELSE
           RAISE EXCEPTION 'Uma requisição com esta chave de idempotência já está em processamento.' USING ERRCODE = '55P03';
@@ -449,7 +600,7 @@ BEGIN
           v_start_hour := 7;
           v_end_hour := 12;
           v_duration := 5;
-          v_amount_for_occ := COALESCE(v_room.morning_rate, 150.00);
+          v_amount_for_occ := v_room.morning_rate;
           v_period_rate_recorded := v_amount_for_occ;
 
         ELSIF p_period_shift = 'AFTERNOON' THEN
@@ -458,11 +609,11 @@ BEGIN
             v_end_hour := 14;
             v_duration := 2;
             -- Proporcional oficial de sábado: 2h de 6h
-            v_amount_for_occ := ROUND(COALESCE(v_room.afternoon_rate, 180.00) * 2.0 / 6.0, 2);
+            v_amount_for_occ := ROUND(v_room.afternoon_rate * 2.0 / 6.0, 2);
           ELSE
             v_end_hour := 18;
             v_duration := 6;
-            v_amount_for_occ := COALESCE(v_room.afternoon_rate, 180.00);
+            v_amount_for_occ := v_room.afternoon_rate;
           END IF;
           v_period_rate_recorded := v_amount_for_occ;
 
@@ -474,7 +625,7 @@ BEGIN
             v_start_hour := 18;
             v_end_hour := 22;
             v_duration := 4;
-            v_amount_for_occ := COALESCE(v_room.night_rate, 130.00);
+            v_amount_for_occ := v_room.night_rate;
             v_period_rate_recorded := v_amount_for_occ;
           END IF;
 
@@ -484,11 +635,11 @@ BEGIN
             v_end_hour := 14;
             v_duration := 7;
             -- Proporcional oficial de sábado: 7h de 15h
-            v_amount_for_occ := ROUND(COALESCE(v_room.period_rate, 400.00) * 7.0 / 15.0, 2);
+            v_amount_for_occ := ROUND(v_room.period_rate * 7.0 / 15.0, 2);
           ELSE
             v_end_hour := 22;
             v_duration := 15;
-            v_amount_for_occ := COALESCE(v_room.period_rate, 400.00);
+            v_amount_for_occ := v_room.period_rate;
           END IF;
           v_period_rate_recorded := v_amount_for_occ;
         END IF;
@@ -674,6 +825,12 @@ END;
 $$;
 
 -- 8. PERMISSÕES LEAST PRIVILEGE
+ALTER FUNCTION public.lock_booking_room_date_before_conflict() OWNER TO postgres;
+REVOKE ALL ON FUNCTION public.lock_booking_room_date_before_conflict() FROM PUBLIC;
+
+ALTER FUNCTION public.check_blocked_slot_conflict_with_lock() OWNER TO postgres;
+REVOKE ALL ON FUNCTION public.check_blocked_slot_conflict_with_lock() FROM PUBLIC;
+
 ALTER FUNCTION public.acquire_room_date_locks(JSONB) OWNER TO postgres;
 REVOKE ALL ON FUNCTION public.acquire_room_date_locks(JSONB) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.acquire_room_date_locks(JSONB) TO authenticated, service_role;
