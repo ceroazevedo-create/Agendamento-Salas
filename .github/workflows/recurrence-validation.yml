@@ -1,0 +1,35 @@
+name: Recurrence repair validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "services/recurrenceService.ts"
+      - "components/Calendar.tsx"
+      - "test/**"
+      - "supabase/migrations/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/recurrence-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  app-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm install
+      - name: TypeScript validation
+        run: npm run lint
+      - name: Recurrence tests
+        run: npm run test:recurrence
+      - name: Production build validation
+        run: npm run build
