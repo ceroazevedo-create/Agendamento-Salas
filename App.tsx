@@ -78,40 +78,39 @@ const AppContent: React.FC = () => {
     initSession();
 
     // 2. Monitoramento de eventos reais de autenticação via Supabase Auth
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       if (!isMounted) return;
 
-      if (event === 'SIGNED_OUT' || !session?.user) {
+      // Só um SIGNED_OUT explícito encerra a sessão da interface.
+      // Eventos transitórios sem sessão não devem apagar um usuário já carregado.
+      if (event === 'SIGNED_OUT') {
         setCurrentUser(null);
         setCurrentView('dashboard');
         setLoading(false);
-      } else {
+        return;
+      }
+
+      if (!session?.user) return;
+
+      // Não chamar métodos do Supabase dentro do callback de auth: o SDK mantém
+      // um lock interno durante a notificação. Adiar evita reentrância/deadlock.
+      setTimeout(async () => {
+        if (!isMounted) return;
         try {
           const user = await authService.getCurrentUser();
-          if (isMounted) {
-            setCurrentUser(user);
-            if (user?.role === 'ADMIN') {
-              setCurrentView('admin');
-            } else if (user) {
-              setCurrentView('dashboard');
-            }
-          }
-        } catch (err: any) {
-          const msg = err?.message || String(err || '');
-          if (
-            !msg.includes('Refresh Token') &&
-            !msg.includes('refresh_token_not_found') &&
-            !msg.includes('invalid_grant')
-          ) {
-            console.warn('Aviso ao sincronizar perfil Supabase:', err);
-          }
+          if (!isMounted || !user) return;
+          setCurrentUser(user);
+          if (user.role === 'ADMIN') setCurrentView('admin');
+          else setCurrentView('dashboard');
+        } catch (err) {
+          console.warn('Aviso ao sincronizar perfil Supabase:', err);
         } finally {
           if (isMounted) {
             clearTimeout(safetyTimer);
             setLoading(false);
           }
         }
-      }
+      }, 0);
     });
 
     return () => {
