@@ -227,69 +227,44 @@ export const authService = {
    */
   getCurrentUser: async (): Promise<User | null> => {
     try {
-      const sessionPromise = supabase.auth.getSession();
-      const timeoutPromise = new Promise<{ data: { session: null }; error: any }>((resolve) =>
-        setTimeout(() => resolve({ data: { session: null }, error: null }), 2500)
-      );
-
-      const { data: { session }, error: sessionError } = await Promise.race([sessionPromise, timeoutPromise]);
-      if (sessionError || !session?.user) {
-        if (sessionError) {
-          const errMsg = sessionError.message || String(sessionError);
-          if (
-            errMsg.includes('Refresh Token') ||
-            errMsg.includes('refresh_token_not_found') ||
-            errMsg.includes('invalid_grant')
-          ) {
-            clearSupabaseStorageTokens();
-            try {
-              await supabase.auth.signOut({ scope: 'local' });
-            } catch {}
-          }
-        }
+      // Não usar timeouts artificiais para transformar uma sessão lenta em logout.
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) {
+        console.warn('Não foi possível recuperar a sessão Supabase:', sessionError);
         return null;
       }
+      if (!session?.user) return null;
 
-      const profilePromise = supabase
+      const { data: profile, error: profileError } = await supabase
         .from('profiles')
         .select('*')
         .eq('id', session.user.id)
         .maybeSingle();
 
-      const profileTimeout = new Promise<{ data: null; error: any }>((resolve) =>
-        setTimeout(() => resolve({ data: null, error: null }), 2500)
-      );
-
-      const { data: profile, error: profileError } = await Promise.race([profilePromise, profileTimeout]);
-      if (profileError || !profile) {
+      // Falha de rede/perfil não significa que a autenticação terminou.
+      if (profileError) {
+        console.warn('Não foi possível carregar o perfil autenticado:', profileError);
         return null;
       }
+      if (!profile) return null;
 
-      const { data: prof } = await supabase
+      const { data: prof, error: professionalError } = await supabase
         .from('professionals')
         .select('*')
         .eq('user_id', session.user.id)
         .maybeSingle();
 
-      return mapProfileToUser(profile, prof, session.user);
-    } catch (err: any) {
-      const msg = err?.message || String(err || '');
-      if (
-        msg.includes('Refresh Token') ||
-        msg.includes('refresh_token_not_found') ||
-        msg.includes('invalid_grant')
-      ) {
-        clearSupabaseStorageTokens();
-        try {
-          await supabase.auth.signOut({ scope: 'local' });
-        } catch {}
-      } else {
-        console.warn('Aviso ao sincronizar sessão atual no Supabase:', err);
+      if (professionalError) {
+        console.warn('Não foi possível carregar os dados profissionais:', professionalError);
       }
+
+      return mapProfileToUser(profile, prof, session.user);
+    } catch (err) {
+      console.warn('Aviso ao sincronizar sessão atual no Supabase:', err);
+      // Nunca apagar tokens persistidos por uma falha transitória de leitura.
       return null;
     }
   },
-
   /**
    * Encerra a sessão ativa no Supabase Auth.
    */
