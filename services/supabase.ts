@@ -169,10 +169,6 @@ try {
       autoRefreshToken: true,
       detectSessionInUrl: true,
       storage: safeSupabaseStorage,
-      // Desativa o navigator.locks do browser que causa deadlocks em iframes sandboxed
-      lock: async (_name, _acquireTimeout, fn) => {
-        return await fn();
-      }
     }
   });
 } catch (err) {
