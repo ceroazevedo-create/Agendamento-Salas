@@ -91,6 +91,12 @@ BEGIN
         AND b.status <> 'cancelled'
         AND GREATEST(b.start_time, 7) < LEAST(b.end_time, 8)
     )
+    AND NOT EXISTS (
+      SELECT 1 FROM public.blocked_slots bs
+      WHERE (bs.room_id = 'ALL' OR bs.room_id = v_room_id)
+        AND bs.blocked_date = d::DATE
+        AND GREATEST(bs.start_time, 7) < LEAST(bs.end_time, 8)
+    )
   ORDER BY d DESC
   LIMIT 1;
 
@@ -142,21 +148,12 @@ BEGIN
 
   IF NOT EXISTS (
     SELECT 1 FROM public.audit_logs
-    WHERE user_id = v_admin_id AND action = 'Exclusão de Profissional'
-      AND details LIKE '%' || v_professional_id::TEXT || '%'
-  ) AND NOT EXISTS (
-    SELECT 1 FROM public.audit_logs
-    WHERE user_id = v_admin_id AND action = 'Exclusão de Profissional'
-      AND details LIKE '%' || COALESCE((SELECT full_name FROM public.profiles WHERE id = v_professional_id), '') || '%'
+    WHERE user_id = v_admin_id
+      AND action = 'Exclusão de Profissional'
+      AND "timestamp" >= transaction_timestamp()
+      AND details LIKE 'Profissional % removido do cadastro.%'
   ) THEN
-    -- A auditoria é verificada pela ação e pelo usuário executor; o texto pode
-    -- usar o nome do profissional em vez do UUID.
-    IF NOT EXISTS (
-      SELECT 1 FROM public.audit_logs
-      WHERE user_id = v_admin_id AND action = 'Exclusão de Profissional'
-    ) THEN
-      RAISE EXCEPTION 'FALHA: não foi gravado o log de auditoria da exclusão.';
-    END IF;
+    RAISE EXCEPTION 'FALHA: não foi gravado o log de auditoria da exclusão.';
   END IF;
 
   RAISE NOTICE 'PASSOU: reserva futura excluída; reserva passada preservada; pagamentos preservados; perfil inativo; cadastro operacional removido; auditoria registrada. Datas usadas: futura %, histórica %. Resultado RPC: %',
