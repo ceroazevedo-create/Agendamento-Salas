@@ -3,7 +3,13 @@ import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ mode, command }) => {
-    const env = loadEnv(mode, '.', '');
+    // No Cloudflare Pages, branches diferentes da branch principal são Previews
+    // e devem compilar contra homologação. A branch main permanece em produção.
+    const cloudflareBranch = process.env.CF_PAGES_BRANCH;
+    const effectiveMode = cloudflareBranch
+      ? (cloudflareBranch === 'main' ? 'production' : 'staging')
+      : mode;
+    const env = loadEnv(effectiveMode, '.', '');
 
     // Constantes dos projetos Supabase
     const PROD_REF = 'gqpavuqopukyfeyqyrxc';
@@ -25,7 +31,7 @@ export default defineConfig(({ mode, command }) => {
     let safeSupabaseUrl = '';
     let safeSupabaseAnonKey = '';
 
-    if (mode === 'staging') {
+    if (effectiveMode === 'staging') {
       if (inputUrl && inputUrl.includes(PROD_REF)) {
         throw new Error(`[BARREIRA DE SEGURANÇA] BLOQUEIO CRÍTICO: Tentativa de usar URL de PRODUÇÃO (${PROD_REF}) no modo de homologação (staging)!`);
       }

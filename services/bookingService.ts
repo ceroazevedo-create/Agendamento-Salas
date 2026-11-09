@@ -208,6 +208,16 @@ export const bookingService = {
           const unSyncedLocal = localActive.filter(lb => {
             if (remoteIds.has(String(lb.id))) return false;
 
+            // Só mantém uma reserva exclusivamente local quando a consulta de perfis
+            // confirmou que seu proprietário ainda existe e está ativo. Se o perfil
+            // não veio do servidor (inativo/removido), não podemos tratar a cópia local
+            // como uma reserva pendente: isso ressuscitaria reservas já excluídas.
+            if (profRes.error || !Array.isArray(profRes.data)) return false;
+            const ownerProfile = profilesMap.get(String(lb.userId || ''));
+            if (!ownerProfile || String(ownerProfile.status || '').toUpperCase() !== 'ACTIVE') {
+              return false;
+            }
+
             // Filtro de segurança: remove reservas falsas de teste (Sala 2 em 14/10 às 18h e 19h)
             const isSala2 = String(lb.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
             const isTargetDate = String(lb.date || '').split('T')[0] === '2026-10-14';
