@@ -1,5 +1,5 @@
 import { User, Role } from '../types';
-import { addAuditLog, getStoredUsers, saveStoredUsers } from './storageService';
+import { addAuditLog, getStoredUsers, saveStoredUsers, removeFutureStoredBookingsForProfessional } from './storageService';
 import { getPasswordValidationMessage } from '../utils/passwordSecurity';
 import { supabase, translateSupabaseError, clearSupabaseStorageTokens, isSupabaseConfigured } from './supabase';
 
@@ -78,7 +78,9 @@ export const authService = {
     }
 
     if (!profile) {
-      throw new Error('Perfil de usuário não localizado no banco de dados. Contate a administração.');
+      await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+      clearSupabaseStorageTokens();
+      throw new Error('Perfil de usuário não localizado ou sem acesso ativo. Entre em contato com a administração.');
     }
 
     // 3. Busca dados complementares em public.professionals
@@ -246,7 +248,13 @@ export const authService = {
         console.warn('Não foi possível carregar o perfil autenticado:', profileError);
         return null;
       }
-      if (!profile) return null;
+      if (!profile) {
+        // A política RLS restritiva oculta o perfil de contas inativas mesmo
+        // quando ainda existe um access token emitido anteriormente.
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+        clearSupabaseStorageTokens();
+        return null;
+      }
 
       const { data: prof, error: professionalError } = await supabase
         .from('professionals')
@@ -258,7 +266,16 @@ export const authService = {
         console.warn('Não foi possível carregar os dados profissionais:', professionalError);
       }
 
-      return mapProfileToUser(profile, prof, session.user);
+      const currentUser = mapProfileToUser(profile, prof, session.user);
+      if (currentUser.status === 'INACTIVE') {
+        // Impede que uma sessão antiga continue sendo tratada como usuário ativo
+        // depois da remoção administrativa ou de uma desativação de conta.
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+        clearSupabaseStorageTokens();
+        return null;
+      }
+
+      return currentUser;
     } catch (err) {
       console.warn('Aviso ao sincronizar sessão atual no Supabase:', err);
       // Nunca apagar tokens persistidos por uma falha transitória de leitura.
@@ -498,7 +515,7 @@ export const authService = {
    * Lista todos os perfis cadastrados no Supabase (utilizado pelo Administrador).
    * Possui fallback resiliente para garantir que o painel administrativo sempre carregue.
    */
-  getAllProfiles: async (): Promise<User[]> => {
+  getAllProfiles: async (includeInactive = false): Promise<User[]> => {
     if (isSupabaseConfigured) {
       try {
         const { data: profiles, error } = await supabase
@@ -508,24 +525,39 @@ export const authService = {
 
         if (error) {
           console.warn('Aviso ao consultar perfis do Supabase:', error);
-        } else if (profiles && profiles.length > 0) {
-          const { data: professionals } = await supabase
+        } else if (profiles) {
+          const { data: professionals, error: professionalsError } = await supabase
             .from('professionals')
             .select('*');
 
-          const profsMap = new Map((professionals || []).map(p => [p.user_id, p]));
-          const mappedUsers = profiles.map(p => mapProfileToUser(p, profsMap.get(p.id)));
-          if (mappedUsers.length > 0) {
-            saveStoredUsers(mappedUsers);
-            return mappedUsers;
+          if (professionalsError) {
+            throw professionalsError;
           }
+
+          const profsMap = new Map((professionals || []).map(p => [p.user_id, p]));
+          const allMappedUsers = profiles.map(p => mapProfileToUser(p, profsMap.get(p.id)));
+          // A lista de exclusão inclui profissionais ativos e inativos que ainda
+          // possuem cadastro operacional. O perfil técnico preservado após a
+          // exclusão não possui mais linha em professionals e não deve reaparecer.
+          const activeUsers = allMappedUsers.filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
+          const eligibleForDeletion = allMappedUsers.filter(user =>
+            user.role === 'ADMIN' || profsMap.has(user.id)
+          );
+          saveStoredUsers(activeUsers);
+          return includeInactive ? eligibleForDeletion : activeUsers;
         }
       } catch (err) {
         console.warn('Exceção ao obter perfis do Supabase, utilizando cache local:', err);
       }
     }
 
-    return getStoredUsers();
+    const storedUsers = getStoredUsers();
+    // Sem confirmação do banco, não exibir cache antigo na lista destrutiva:
+    // ele pode conter perfis técnicos já excluídos.
+    if (includeInactive && isSupabaseConfigured) return [];
+    return includeInactive
+      ? storedUsers
+      : storedUsers.filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
   },
 
   /**
@@ -574,33 +606,46 @@ export const authService = {
   },
 
   /**
-   * Exclui um profissional da plataforma. Administradores não podem ser excluídos.
+   * Remove o cadastro operacional e revoga o acesso pelo endpoint administrativo.
+   * O backend preserva perfis, reservas passadas e pagamentos históricos.
    */
   deleteUser: async (userId: string, adminUser?: User): Promise<void> => {
-    const { data: target } = await supabase
-      .from('profiles')
-      .select('role, full_name, email')
-      .eq('id', userId)
-      .maybeSingle();
-
-    if (target?.role === 'admin' || target?.role === 'ADMIN') {
-      throw new Error('Não é permitido excluir contas com perfil de Administrador.');
+    if (!adminUser || adminUser.role !== 'ADMIN') {
+      throw new Error('Somente um administrador autenticado pode excluir profissionais.');
     }
 
-    await supabase.from('professionals').delete().eq('user_id', userId);
-    const { error } = await supabase.from('profiles').delete().eq('id', userId);
-
-    if (error) {
-      throw new Error(translateSupabaseError(error));
+    const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError || !sessionData.session?.access_token) {
+      throw new Error('Sessão administrativa não encontrada. Entre novamente no sistema.');
     }
 
-    if (adminUser) {
-      addAuditLog(
-        adminUser.id,
-        adminUser.name,
-        'Exclusão de Profissional',
-        `Profissional ${target?.full_name || userId} foi excluído do sistema.`
-      );
+    const response = await fetch('/api/admin/delete-professional', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionData.session.access_token}`
+      },
+      body: JSON.stringify({ userId })
+    });
+
+    let result: any = null;
+    try {
+      result = await response.json();
+    } catch {
+      throw new Error('O servidor retornou uma resposta inválida ao excluir o profissional.');
     }
+
+    if (!response.ok || !result?.success) {
+      throw new Error(result?.error || 'Não foi possível concluir a exclusão do profissional.');
+    }
+
+    const storedUsers = getStoredUsers().filter(user => user.id !== userId);
+    saveStoredUsers(storedUsers);
+
+    // Limpa cópias locais de reservas futuras somente após o backend confirmar
+    // a exclusão. Reservas de hoje e anteriores permanecem no histórico local.
+    removeFutureStoredBookingsForProfessional(userId);
+
+    // A auditoria desta operação já é gravada atomicamente pela função SQL.
   }
 };
