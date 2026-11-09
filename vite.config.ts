@@ -5,6 +5,14 @@ import react from '@vitejs/plugin-react';
 export default defineConfig(({ mode, command }) => {
     const env = loadEnv(mode, '.', '');
 
+    // O Cloudflare Pages usa o modo Vite "production" também nas prévias.
+    // LOCAPSICO_ENV define explicitamente o ambiente de implantação.
+    const configuredEnvironment = (env.LOCAPSICO_ENV || '').trim().toLowerCase();
+    if (configuredEnvironment && !['production', 'staging'].includes(configuredEnvironment)) {
+      throw new Error(`[CONFIGURAÇÃO INVÁLIDA] LOCAPSICO_ENV deve ser "production" ou "staging"; recebido: "${configuredEnvironment}".`);
+    }
+    const effectiveMode = configuredEnvironment || mode;
+
     // Constantes dos projetos Supabase
     const PROD_REF = 'gqpavuqopukyfeyqyrxc';
     const STAGING_REF = 'rhuwvnusbzdgoaarhbkr';
@@ -25,7 +33,7 @@ export default defineConfig(({ mode, command }) => {
     let safeSupabaseUrl = '';
     let safeSupabaseAnonKey = '';
 
-    if (mode === 'staging') {
+    if (effectiveMode === 'staging') {
       if (inputUrl && inputUrl.includes(PROD_REF)) {
         throw new Error(`[BARREIRA DE SEGURANÇA] BLOQUEIO CRÍTICO: Tentativa de usar URL de PRODUÇÃO (${PROD_REF}) no modo de homologação (staging)!`);
       }
@@ -51,7 +59,6 @@ export default defineConfig(({ mode, command }) => {
       }
     } else {
       // Modo Produção (padrão)
-      const inputUrl = (env.VITE_SUPABASE_URL || '').trim();
       if (inputUrl && inputUrl.includes(STAGING_REF)) {
         throw new Error(`[BARREIRA DE SEGURANÇA] BLOQUEIO: URL de homologação (${STAGING_REF}) detectada em modo de produção!`);
       }
