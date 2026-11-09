@@ -134,6 +134,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
 
   // Delete Professional State (Exclusão no menu Configurações)
   const [selectedProfToDelete, setSelectedProfToDelete] = useState<string>('');
+  const [deletionUsers, setDeletionUsers] = useState<User[]>([]);
   const [userPendingDeletion, setUserPendingDeletion] = useState<User | null>(null);
   const [isDeletingUser, setIsDeletingUser] = useState(false);
   const [deleteConfirmCheckbox, setDeleteConfirmCheckbox] = useState(false);
@@ -178,9 +179,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
   const loadAdminData = async () => {
     setIsLoading(true);
     try {
-      const [bookingsRes, profilesRes, roomsRes, blocksRes, settingsRes] = await Promise.allSettled([
+      const [bookingsRes, profilesRes, deletionProfilesRes, roomsRes, blocksRes, settingsRes] = await Promise.allSettled([
         bookingService.getAllBookingsWithCancelled(),
         authService.getAllProfiles(),
+        authService.getAllProfiles(true),
         bookingService.getRooms(),
         bookingService.getBlockedSlots(),
         bookingService.getGlobalSettings()
@@ -202,6 +204,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
           console.warn('Aviso: falha ao carregar perfis do Supabase, usando local:', profilesRes.reason);
         }
         setUsers(getStoredUsers());
+      }
+
+      if (deletionProfilesRes.status === 'fulfilled' && deletionProfilesRes.value) {
+        setDeletionUsers(deletionProfilesRes.value);
+      } else {
+        if (deletionProfilesRes.status === 'rejected') {
+          console.warn('Aviso: falha ao carregar perfis para exclusão:', deletionProfilesRes.reason);
+        }
+        setDeletionUsers(getStoredUsers());
       }
 
       if (roomsRes.status === 'fulfilled' && roomsRes.value) {
@@ -1924,7 +1935,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                     className="w-full px-4 py-3 bg-white border-2 border-teal-200 rounded-2xl text-xs sm:text-sm font-semibold text-gray-800 focus:outline-none focus:border-teal-600 transition-all shadow-xs"
                   >
                     <option value="">-- Selecione o profissional que esqueceu a senha --</option>
-                    {users.filter(u => u.role === 'USER').map(p => (
+                    {deletionUsers.filter(u => u.role === 'USER').map(p => (
                       <option key={p.id} value={p.id}>
                         {p.name} — {p.profession || 'Terapeuta'} ({p.email})
                       </option>
@@ -2064,7 +2075,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                     Excluir Profissional do Aplicativo
                   </h4>
                   <p className="text-xs text-gray-600 mt-1 leading-relaxed">
-                    Comando administrativo para revogar e excluir permanentemente a conta de um psicólogo ou terapeuta do LocaPsico.
+                    Comando administrativo para remover o cadastro de um profissional, revogar seu acesso e preservar o histórico financeiro e de reservas.
                   </p>
                 </div>
               </div>
@@ -2080,7 +2091,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                     className="w-full px-4 py-3 bg-white border-2 border-red-200 rounded-2xl text-xs sm:text-sm font-semibold text-gray-800 focus:outline-none focus:border-red-500 transition-all shadow-xs"
                   >
                     <option value="">-- Selecione um profissional cadastrado --</option>
-                    {users.filter(u => u.role === 'USER').map(p => (
+                    {deletionUsers.filter(u => u.role === 'USER').map(p => (
                       <option key={p.id} value={p.id}>
                         {p.name} — {p.profession || 'Terapeuta'} ({p.email})
                       </option>
@@ -2089,7 +2100,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                 </div>
 
                 {selectedProfToDelete && (() => {
-                  const targetProf = users.find(u => u.id === selectedProfToDelete);
+                  const targetProf = deletionUsers.find(u => u.id === selectedProfToDelete);
                   if (!targetProf) return null;
 
                   const profBookings = bookings.filter(b => b.userId === targetProf.id && b.paymentStatus !== 'CANCELLED');
@@ -3299,10 +3310,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
             <AlertTriangle className="shrink-0 text-red-600 mt-0.5" size={20} />
             <div className="text-xs space-y-1 leading-relaxed">
               <p className="font-black text-sm text-red-800">
-                Atenção: Ação Irreversível
+                Atenção: Remoção do cadastro e bloqueio de acesso
               </p>
               <p>
-                Você está prestes a excluir permanentemente a conta de <strong className="font-black">{userPendingDeletion?.name}</strong> ({userPendingDeletion?.email}) do aplicativo.
+                Você está prestes a remover o cadastro de <strong className="font-black">{userPendingDeletion?.name}</strong> ({userPendingDeletion?.email}) do aplicativo.
               </p>
             </div>
           </div>
@@ -3310,9 +3321,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
           <div className="text-xs text-gray-600 space-y-2 bg-gray-50 p-4 rounded-2xl border border-gray-100">
             <p className="font-bold text-gray-900">Impactos da exclusão:</p>
             <ul className="list-disc list-inside space-y-1 text-gray-600">
-              <li>O profissional perderá imediatamente o acesso ao sistema.</li>
-              <li>Todas as credenciais de login serão permanentemente deletadas.</li>
-              <li>A ação será registrada na trilha de auditoria para fins de segurança.</li>
+              <li>O acesso ao Supabase Auth será desativado; o profissional não poderá entrar novamente.</li>
+              <li>Todos os agendamentos com data posterior a hoje serão excluídos. Os de hoje e os anteriores permanecerão no histórico.</li>
+              <li>Pagamentos e registros financeiros serão preservados, inclusive lançamentos vinculados a agendamentos futuros excluídos.</li>
+              <li>O cadastro operacional sairá da lista; um registro técnico inativo será mantido para preservar as relações do histórico.</li>
             </ul>
           </div>
 
@@ -3324,7 +3336,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
               className="mt-0.5 rounded text-red-600 focus:ring-red-500"
             />
             <span className="text-xs font-bold text-gray-800">
-              Confirmo que desejo excluir definitivamente este profissional do LocaPsico.
+              Confirmo que entendi a remoção do cadastro, a exclusão dos agendamentos futuros e a preservação do histórico.
             </span>
           </label>
 
