@@ -258,7 +258,16 @@ export const authService = {
         console.warn('Não foi possível carregar os dados profissionais:', professionalError);
       }
 
-      return mapProfileToUser(profile, prof, session.user);
+      const currentUser = mapProfileToUser(profile, prof, session.user);
+      if (currentUser.status === 'INACTIVE') {
+        // Impede que uma sessão antiga continue sendo tratada como usuário ativo
+        // depois da remoção administrativa ou de uma desativação de conta.
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+        clearSupabaseStorageTokens();
+        return null;
+      }
+
+      return currentUser;
     } catch (err) {
       console.warn('Aviso ao sincronizar sessão atual no Supabase:', err);
       // Nunca apagar tokens persistidos por uma falha transitória de leitura.
