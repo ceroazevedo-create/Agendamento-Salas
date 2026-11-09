@@ -514,18 +514,23 @@ export const authService = {
             .select('*');
 
           const profsMap = new Map((professionals || []).map(p => [p.user_id, p]));
-          const mappedUsers = profiles.map(p => mapProfileToUser(p, profsMap.get(p.id)));
+          // Perfis inativos permanecem no banco apenas para sustentar o histórico,
+          // mas não devem reaparecer como profissionais cadastrados no painel.
+          const mappedUsers = profiles
+            .map(p => mapProfileToUser(p, profsMap.get(p.id)))
+            .filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
           if (mappedUsers.length > 0) {
             saveStoredUsers(mappedUsers);
             return mappedUsers;
           }
+          saveStoredUsers([]);
         }
       } catch (err) {
         console.warn('Exceção ao obter perfis do Supabase, utilizando cache local:', err);
       }
     }
 
-    return getStoredUsers();
+    return getStoredUsers().filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
   },
 
   /**
@@ -574,33 +579,47 @@ export const authService = {
   },
 
   /**
-   * Exclui um profissional da plataforma. Administradores não podem ser excluídos.
+   * Remove o cadastro operacional e revoga o acesso pelo endpoint administrativo.
+   * O backend preserva perfis, reservas passadas e pagamentos históricos.
    */
   deleteUser: async (userId: string, adminUser?: User): Promise<void> => {
-    const { data: target } = await supabase
-      .from('profiles')
-      .select('role, full_name, email')
-      .eq('id', userId)
-      .maybeSingle();
-
-    if (target?.role === 'admin' || target?.role === 'ADMIN') {
-      throw new Error('Não é permitido excluir contas com perfil de Administrador.');
+    if (!adminUser || adminUser.role !== 'ADMIN') {
+      throw new Error('Somente um administrador autenticado pode excluir profissionais.');
     }
 
-    await supabase.from('professionals').delete().eq('user_id', userId);
-    const { error } = await supabase.from('profiles').delete().eq('id', userId);
-
-    if (error) {
-      throw new Error(translateSupabaseError(error));
+    const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError || !sessionData.session?.access_token) {
+      throw new Error('Sessão administrativa não encontrada. Entre novamente no sistema.');
     }
 
-    if (adminUser) {
-      addAuditLog(
-        adminUser.id,
-        adminUser.name,
-        'Exclusão de Profissional',
-        `Profissional ${target?.full_name || userId} foi excluído do sistema.`
-      );
+    const response = await fetch('/api/admin/delete-professional', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionData.session.access_token}`
+      },
+      body: JSON.stringify({ userId })
+    });
+
+    let result: any = null;
+    try {
+      result = await response.json();
+    } catch {
+      throw new Error('O servidor retornou uma resposta inválida ao excluir o profissional.');
     }
+
+    if (!response.ok || !result?.success) {
+      throw new Error(result?.error || 'Não foi possível concluir a exclusão do profissional.');
+    }
+
+    const storedUsers = getStoredUsers().filter(user => user.id !== userId);
+    saveStoredUsers(storedUsers);
+
+    addAuditLog(
+      adminUser.id,
+      adminUser.name,
+      'Exclusão de Profissional',
+      `Cadastro operacional do profissional ${userId} removido. Histórico preservado.`
+    );
   }
 };
