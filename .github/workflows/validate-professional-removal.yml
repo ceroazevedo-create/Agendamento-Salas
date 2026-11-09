@@ -1,0 +1,37 @@
+name: Validate professional removal branch
+
+on:
+  push:
+    branches:
+      - fix/professional-removal-preserve-history
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript validation
+        run: npm run lint
+
+      - name: Existing automated tests
+        run: npm test
+
+      - name: Production build (no deploy)
+        run: npm run build
