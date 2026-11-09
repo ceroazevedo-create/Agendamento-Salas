@@ -88,7 +88,7 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
 
     const { data: target, error: targetError } = await admin
       .from('profiles')
-      .select('role, full_name')
+      .select('role, status, full_name')
       .eq('id', userId)
       .maybeSingle();
 
@@ -98,8 +98,17 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
       return jsonResponse({ error: 'Não é permitido excluir contas administrativas.' }, 403);
     }
 
-    // A transação no banco primeiro remove reservas futuras e retira o profissional
-    // da lista, mantendo o profile para preservar as FKs do histórico.
+    // Confirma a identidade Auth antes de alterar o banco, evitando remoção parcial
+    // quando o usuário de autenticação já não existe.
+    const { data: authBefore, error: authBeforeError } = await admin.auth.admin.getUserById(userId);
+    if (authBeforeError || !authBefore?.user) {
+      return jsonResponse({
+        error: 'Não foi possível confirmar a conta deste profissional no Supabase Auth. Nenhuma alteração foi feita no cadastro ou nos agendamentos.',
+        partial: false
+      }, 409);
+    }
+
+    // A função SQL é transacional e idempotente; retries não repetem a auditoria.
     const { data: removal, error: removalError } = await admin.rpc('admin_remove_professional', {
       p_user_id: userId,
       p_admin_user_id: callerData.user.id
@@ -109,21 +118,13 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
       return jsonResponse({ error: removalError.message || 'Falha ao remover o profissional do banco.' }, 500);
     }
 
-    // Soft delete no Auth: desativa a conta sem apagar a linha referenciada por profiles.
-    const { data: authUser, error: authLookupError } = await admin.auth.admin.getUserById(userId);
-    if (authLookupError || !authUser?.user) {
-      return jsonResponse({
-        error: 'O cadastro foi retirado e marcado como inativo, mas não foi possível confirmar a conta no Supabase Auth. A operação precisa ser verificada antes de considerar a exclusão concluída.',
-        partial: true,
-        removal
-      }, 502);
-    }
-
-    if (!authUser.user.deleted_at) {
+    // Soft delete preserva profiles e as FKs do histórico. Se a tentativa anterior
+    // já concluiu o Auth, deleted_at evita repetir a operação.
+    if (!authBefore.user.deleted_at) {
       const { error: authDeleteError } = await admin.auth.admin.deleteUser(userId, true);
       if (authDeleteError) {
         return jsonResponse({
-          error: 'O cadastro foi retirado e marcado como inativo, mas o Supabase Auth não confirmou a desativação da conta. Tente novamente ou verifique a conta no painel Auth.',
+          error: 'O cadastro já foi retirado e marcado como inativo, mas a desativação no Supabase Auth não foi confirmada. Você pode tentar novamente; o banco não repetirá a exclusão dos agendamentos nem a auditoria.',
           partial: true,
           removal
         }, 502);
