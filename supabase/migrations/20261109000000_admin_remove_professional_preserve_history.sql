@@ -36,7 +36,8 @@ BEGIN
     'payments',
     'blocked_slots',
     'settings',
-    'audit_logs'
+    'audit_logs',
+    'booking_idempotency_keys'
   ]
   LOOP
     EXECUTE format(
@@ -166,3 +167,19 @@ REVOKE ALL ON FUNCTION public.admin_remove_professional(UUID, UUID) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.admin_remove_professional(UUID, UUID) FROM anon;
 REVOKE ALL ON FUNCTION public.admin_remove_professional(UUID, UUID) FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.admin_remove_professional(UUID, UUID) TO service_role;
+
+-- Funções auxiliares de advisory lock não devem ser RPCs públicas para authenticated.
+-- São chamadas internamente pela RPC de recorrência e pelos triggers SECURITY DEFINER.
+REVOKE ALL ON FUNCTION public.acquire_room_date_locks(JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.acquire_room_date_locks(JSONB) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.acquire_room_date_locks(JSONB) TO service_role;
+
+REVOKE ALL ON FUNCTION public.acquire_room_date_lock(TEXT, DATE) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.acquire_room_date_lock(TEXT, DATE) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.acquire_room_date_lock(TEXT, DATE) TO service_role;
+
+-- A restauração completa já é executada pelo endpoint administrativo no servidor
+-- com service_role. Não permitir chamada direta por sessões authenticated.
+REVOKE ALL ON FUNCTION public.execute_admin_full_restore(JSONB, UUID) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.execute_admin_full_restore(JSONB, UUID) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.execute_admin_full_restore(JSONB, UUID) TO service_role;
