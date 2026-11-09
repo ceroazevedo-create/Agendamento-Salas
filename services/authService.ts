@@ -624,11 +624,6 @@ export const authService = {
     const storedUsers = getStoredUsers().filter(user => user.id !== userId);
     saveStoredUsers(storedUsers);
 
-    addAuditLog(
-      adminUser.id,
-      adminUser.name,
-      'Exclusão de Profissional',
-      `Cadastro operacional do profissional ${userId} removido. Histórico preservado.`
-    );
+    // A auditoria desta operação já é gravada atomicamente pela função SQL.
   }
 };
