@@ -2091,7 +2091,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                     className="w-full px-4 py-3 bg-white border-2 border-red-200 rounded-2xl text-xs sm:text-sm font-semibold text-gray-800 focus:outline-none focus:border-red-500 transition-all shadow-xs"
                   >
                     <option value="">-- Selecione um profissional cadastrado --</option>
-                    {users.filter(u => u.role === 'USER').map(p => (
+                    {deletionUsers.filter(u => u.role === 'USER').map(p => (
                       <option key={p.id} value={p.id}>
                         {p.name} — {p.profession || 'Terapeuta'} ({p.email})
                       </option>
