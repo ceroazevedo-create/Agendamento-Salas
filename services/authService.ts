@@ -78,7 +78,9 @@ export const authService = {
     }
 
     if (!profile) {
-      throw new Error('Perfil de usuário não localizado no banco de dados. Contate a administração.');
+      await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+      clearSupabaseStorageTokens();
+      throw new Error('Perfil de usuário não localizado ou sem acesso ativo. Entre em contato com a administração.');
     }
 
     // 3. Busca dados complementares em public.professionals
@@ -246,7 +248,13 @@ export const authService = {
         console.warn('Não foi possível carregar o perfil autenticado:', profileError);
         return null;
       }
-      if (!profile) return null;
+      if (!profile) {
+        // A política RLS restritiva oculta o perfil de contas inativas mesmo
+        // quando ainda existe um access token emitido anteriormente.
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+        clearSupabaseStorageTokens();
+        return null;
+      }
 
       const { data: prof, error: professionalError } = await supabase
         .from('professionals')
