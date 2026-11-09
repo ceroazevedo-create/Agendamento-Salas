@@ -60,13 +60,18 @@ BEGIN
     RAISE EXCEPTION 'FALHA DE SEGURANÇA: authenticated consegue executar admin_remove_professional.';
   END IF;
 
-  IF has_function_privilege('authenticated', 'public.execute_admin_full_restore(jsonb,uuid)', 'EXECUTE') THEN
+  IF to_regprocedure('public.execute_admin_full_restore(jsonb,uuid)') IS NOT NULL
+     AND has_function_privilege('authenticated', 'public.execute_admin_full_restore(jsonb,uuid)', 'EXECUTE') THEN
     RAISE EXCEPTION 'FALHA DE SEGURANÇA: authenticated consegue executar a restauração administrativa.';
   END IF;
 
-  IF has_function_privilege('authenticated', 'public.acquire_room_date_locks(jsonb)', 'EXECUTE')
-     OR has_function_privilege('authenticated', 'public.acquire_room_date_lock(text,date)', 'EXECUTE') THEN
-    RAISE EXCEPTION 'FALHA DE SEGURANÇA: authenticated consegue executar funções internas de advisory lock.';
+  IF has_function_privilege('authenticated', 'public.acquire_room_date_locks(jsonb)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FALHA DE SEGURANÇA: authenticated consegue executar acquire_room_date_locks.';
+  END IF;
+
+  IF to_regprocedure('public.acquire_room_date_lock(text,date)') IS NOT NULL
+     AND has_function_privilege('authenticated', 'public.acquire_room_date_lock(text,date)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FALHA DE SEGURANÇA: authenticated consegue executar acquire_room_date_lock.';
   END IF;
 
   IF NOT has_function_privilege('authenticated', 'public.create_recurring_series(text,uuid,uuid,text,integer,integer,text,text,text,date[],boolean,text,text)', 'EXECUTE') THEN
