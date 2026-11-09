@@ -1935,7 +1935,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                     className="w-full px-4 py-3 bg-white border-2 border-teal-200 rounded-2xl text-xs sm:text-sm font-semibold text-gray-800 focus:outline-none focus:border-teal-600 transition-all shadow-xs"
                   >
                     <option value="">-- Selecione o profissional que esqueceu a senha --</option>
-                    {deletionUsers.filter(u => u.role === 'USER').map(p => (
+                    {users.filter(u => u.role === 'USER').map(p => (
                       <option key={p.id} value={p.id}>
                         {p.name} — {p.profession || 'Terapeuta'} ({p.email})
                       </option>
