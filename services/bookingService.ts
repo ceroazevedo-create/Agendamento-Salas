@@ -208,6 +208,13 @@ export const bookingService = {
           const unSyncedLocal = localActive.filter(lb => {
             if (remoteIds.has(String(lb.id))) return false;
 
+            // Não ressuscita cópias locais de profissionais já inativados/removidos.
+            // O histórico que ainda existe no Supabase continua vindo em activeRemote.
+            const ownerProfile = profilesMap.get(String(lb.userId || ''));
+            if (ownerProfile && String(ownerProfile.status || '').toUpperCase() !== 'ACTIVE') {
+              return false;
+            }
+
             // Filtro de segurança: remove reservas falsas de teste (Sala 2 em 14/10 às 18h e 19h)
             const isSala2 = String(lb.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
             const isTargetDate = String(lb.date || '').split('T')[0] === '2026-10-14';
