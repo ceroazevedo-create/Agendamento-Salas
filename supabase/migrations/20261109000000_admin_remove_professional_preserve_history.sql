@@ -40,8 +40,8 @@ BEGIN
   ]
   LOOP
     EXECUTE format(
-      'DROP POLICY IF EXISTS "Somente perfis ativos acessam %I" ON public.%I',
-      v_table, v_table
+      'DROP POLICY IF EXISTS %I ON public.%I',
+      'Somente perfis ativos acessam ' || v_table, v_table
     );
     EXECUTE format(
       'CREATE POLICY %I ON public.%I AS RESTRICTIVE FOR ALL TO authenticated USING (public.is_active_user()) WITH CHECK (public.is_active_user())',
