@@ -515,7 +515,7 @@ export const authService = {
    * Lista todos os perfis cadastrados no Supabase (utilizado pelo Administrador).
    * Possui fallback resiliente para garantir que o painel administrativo sempre carregue.
    */
-  getAllProfiles: async (): Promise<User[]> => {
+  getAllProfiles: async (includeInactive = false): Promise<User[]> => {
     if (isSupabaseConfigured) {
       try {
         const { data: profiles, error } = await supabase
@@ -525,29 +525,29 @@ export const authService = {
 
         if (error) {
           console.warn('Aviso ao consultar perfis do Supabase:', error);
-        } else if (profiles && profiles.length > 0) {
+        } else if (profiles) {
           const { data: professionals } = await supabase
             .from('professionals')
             .select('*');
 
           const profsMap = new Map((professionals || []).map(p => [p.user_id, p]));
-          // Perfis inativos permanecem no banco apenas para sustentar o histórico,
-          // mas não devem reaparecer como profissionais cadastrados no painel.
-          const mappedUsers = profiles
-            .map(p => mapProfileToUser(p, profsMap.get(p.id)))
-            .filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
-          if (mappedUsers.length > 0) {
-            saveStoredUsers(mappedUsers);
-            return mappedUsers;
-          }
-          saveStoredUsers([]);
+          const allMappedUsers = profiles.map(p => mapProfileToUser(p, profsMap.get(p.id)));
+          // A lista operacional continua ocultando inativos. A tela de exclusão
+          // pode solicitá-los explicitamente para concluir uma remoção iniciada
+          // por uma desativação anterior.
+          const activeUsers = allMappedUsers.filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
+          saveStoredUsers(activeUsers);
+          return includeInactive ? allMappedUsers : activeUsers;
         }
       } catch (err) {
         console.warn('Exceção ao obter perfis do Supabase, utilizando cache local:', err);
       }
     }
 
-    return getStoredUsers().filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
+    const storedUsers = getStoredUsers();
+    return includeInactive
+      ? storedUsers
+      : storedUsers.filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
   },
 
   /**
