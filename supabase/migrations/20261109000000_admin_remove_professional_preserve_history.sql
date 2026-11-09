@@ -172,7 +172,7 @@ GRANT EXECUTE ON FUNCTION public.admin_remove_professional(UUID, UUID) TO servic
 -- Aplique as permissões somente às assinaturas que existem neste projeto.
 -- Isso mantém a migration compatível com instalações que não possuem todas
 -- as funções auxiliares de versões anteriores.
-DO $
+DO $optional_functions$
 BEGIN
   IF to_regprocedure('public.acquire_room_date_locks(jsonb)') IS NOT NULL THEN
     REVOKE ALL ON FUNCTION public.acquire_room_date_locks(JSONB) FROM PUBLIC;
@@ -192,4 +192,4 @@ BEGIN
     GRANT EXECUTE ON FUNCTION public.execute_admin_full_restore(JSONB, UUID) TO service_role;
   END IF;
 END;
-$;
+$optional_functions$;
