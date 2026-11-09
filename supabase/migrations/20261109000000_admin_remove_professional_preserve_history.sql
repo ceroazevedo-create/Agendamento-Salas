@@ -1,4 +1,57 @@
 -- Remove um profissional sem destruir o histórico financeiro e de reservas.
+-- Bloqueia imediatamente o uso das tabelas públicas por sessões de perfis inativos.
+-- A verificação é feita no banco, não apenas na interface, pois JWTs já emitidos
+-- podem permanecer válidos até expirarem.
+CREATE OR REPLACE FUNCTION public.is_active_user()
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.profiles
+    WHERE id = auth.uid()
+      AND UPPER(COALESCE(status, '')) = 'ACTIVE'
+  );
+$;
+
+REVOKE ALL ON FUNCTION public.is_active_user() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.is_active_user() TO authenticated, service_role;
+
+-- Políticas RESTRICTIVE são combinadas com AND às políticas permissivas atuais.
+-- Assim, preservam-se as regras de cada tabela, mas nenhum perfil INACTIVE
+-- consegue consultar ou alterar dados via API usando um token antigo.
+DO $
+DECLARE
+  v_table TEXT;
+BEGIN
+  FOREACH v_table IN ARRAY ARRAY[
+    'profiles',
+    'professionals',
+    'clients',
+    'rooms',
+    'bookings',
+    'payments',
+    'blocked_slots',
+    'settings',
+    'audit_logs'
+  ]
+  LOOP
+    EXECUTE format(
+      'DROP POLICY IF EXISTS "Somente perfis ativos acessam %I" ON public.%I',
+      v_table, v_table
+    );
+    EXECUTE format(
+      'CREATE POLICY %I ON public.%I AS RESTRICTIVE FOR ALL TO authenticated USING (public.is_active_user()) WITH CHECK (public.is_active_user())',
+      'Somente perfis ativos acessam ' || v_table,
+      v_table
+    );
+  END LOOP;
+END;
+$;
+
 -- A operação é chamada exclusivamente pelo endpoint administrativo com service_role.
 CREATE OR REPLACE FUNCTION public.admin_remove_professional(
   p_user_id UUID,
