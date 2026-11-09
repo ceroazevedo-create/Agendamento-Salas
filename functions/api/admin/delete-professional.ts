@@ -4,6 +4,7 @@ export interface Env {
   SUPABASE_SERVICE_ROLE_KEY?: string;
   SUPABASE_URL?: string;
   VITE_SUPABASE_URL?: string;
+  LOCAPSICO_ENV?: string;
 }
 
 export interface PagesFunctionContext<EnvType = Env> {
@@ -24,9 +25,33 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
 function getSupabaseAdmin(env: Env) {
   const url = (env.SUPABASE_URL || env.VITE_SUPABASE_URL || '').trim();
   const serviceKey = (env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
-  if (!url || !serviceKey) {
-    throw new Error('Configuração administrativa do Supabase ausente no servidor.');
+  const deploymentEnvironment = String(env.LOCAPSICO_ENV || '').trim().toLowerCase();
+  const expectedProjectRef =
+    deploymentEnvironment === 'production'
+      ? 'gqpavuqopukyfeyqyrxc'
+      : deploymentEnvironment === 'staging'
+        ? 'rhuwvnusbzdgoaarhbkr'
+        : '';
+
+  if (!url || !serviceKey || !expectedProjectRef) {
+    throw new Error('Configuração administrativa incompleta. Defina URL, chave de serviço e LOCAPSICO_ENV (production ou staging).');
   }
+
+  let actualProjectRef = '';
+  try {
+    const parsedUrl = new URL(url);
+    if (parsedUrl.protocol !== 'https:' || !parsedUrl.hostname.endsWith('.supabase.co')) {
+      throw new Error('URL Supabase inválida.');
+    }
+    actualProjectRef = parsedUrl.hostname.slice(0, -'.supabase.co'.length);
+  } catch {
+    throw new Error('URL do Supabase inválida para o ambiente configurado.');
+  }
+
+  if (actualProjectRef !== expectedProjectRef) {
+    throw new Error('Bloqueio de segurança: o projeto Supabase configurado não corresponde ao ambiente de execução.');
+  }
+
   return createClient(url, serviceKey, {
     auth: { autoRefreshToken: false, persistSession: false }
   });
