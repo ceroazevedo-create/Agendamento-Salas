@@ -1,5 +1,5 @@
 import { User, Role } from '../types';
-import { addAuditLog, getStoredUsers, saveStoredUsers } from './storageService';
+import { addAuditLog, getStoredUsers, saveStoredUsers, removeFutureStoredBookingsForProfessional } from './storageService';
 import { getPasswordValidationMessage } from '../utils/passwordSecurity';
 import { supabase, translateSupabaseError, clearSupabaseStorageTokens, isSupabaseConfigured } from './supabase';
 
@@ -641,6 +641,10 @@ export const authService = {
 
     const storedUsers = getStoredUsers().filter(user => user.id !== userId);
     saveStoredUsers(storedUsers);
+
+    // Limpa cópias locais de reservas futuras somente após o backend confirmar
+    // a exclusão. Reservas de hoje e anteriores permanecem no histórico local.
+    removeFutureStoredBookingsForProfessional(userId);
 
     // A auditoria desta operação já é gravada atomicamente pela função SQL.
   }
