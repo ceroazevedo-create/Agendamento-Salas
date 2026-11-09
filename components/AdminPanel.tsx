@@ -2064,7 +2064,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                     Excluir Profissional do Aplicativo
                   </h4>
                   <p className="text-xs text-gray-600 mt-1 leading-relaxed">
-                    Comando administrativo para revogar e excluir permanentemente a conta de um psicólogo ou terapeuta do LocaPsico.
+                    Comando administrativo para remover o cadastro de um profissional, revogar seu acesso e preservar o histórico financeiro e de reservas.
                   </p>
                 </div>
               </div>
@@ -3299,10 +3299,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
             <AlertTriangle className="shrink-0 text-red-600 mt-0.5" size={20} />
             <div className="text-xs space-y-1 leading-relaxed">
               <p className="font-black text-sm text-red-800">
-                Atenção: Ação Irreversível
+                Atenção: Remoção do cadastro e bloqueio de acesso
               </p>
               <p>
-                Você está prestes a excluir permanentemente a conta de <strong className="font-black">{userPendingDeletion?.name}</strong> ({userPendingDeletion?.email}) do aplicativo.
+                Você está prestes a remover o cadastro de <strong className="font-black">{userPendingDeletion?.name}</strong> ({userPendingDeletion?.email}) do aplicativo.
               </p>
             </div>
           </div>
@@ -3310,9 +3310,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
           <div className="text-xs text-gray-600 space-y-2 bg-gray-50 p-4 rounded-2xl border border-gray-100">
             <p className="font-bold text-gray-900">Impactos da exclusão:</p>
             <ul className="list-disc list-inside space-y-1 text-gray-600">
-              <li>O profissional perderá imediatamente o acesso ao sistema.</li>
-              <li>Todas as credenciais de login serão permanentemente deletadas.</li>
-              <li>A ação será registrada na trilha de auditoria para fins de segurança.</li>
+              <li>O acesso ao Supabase Auth será desativado; o profissional não poderá entrar novamente.</li>
+              <li>Todos os agendamentos com data posterior a hoje serão excluídos. Os de hoje e os anteriores permanecerão no histórico.</li>
+              <li>Pagamentos e registros financeiros serão preservados, inclusive lançamentos vinculados a agendamentos futuros excluídos.</li>
+              <li>O cadastro operacional sairá da lista; um registro técnico inativo será mantido para preservar as relações do histórico.</li>
             </ul>
           </div>
 
@@ -3324,7 +3325,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
               className="mt-0.5 rounded text-red-600 focus:ring-red-500"
             />
             <span className="text-xs font-bold text-gray-800">
-              Confirmo que desejo excluir definitivamente este profissional do LocaPsico.
+              Confirmo que entendi a remoção do cadastro, a exclusão dos agendamentos futuros e a preservação do histórico.
             </span>
           </label>
 
