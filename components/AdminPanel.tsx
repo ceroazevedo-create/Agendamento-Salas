@@ -8,6 +8,7 @@ import {
   getSystemConfig, 
   saveSystemConfig,
   getStoredBookings,
+  removeFutureStoredBookingsForProfessional,
   getStoredUsers,
   getStoredBlockedSlots
 } from '../services/storageService';
@@ -599,6 +600,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
     setIsDeletingUser(true);
     try {
       await authService.deleteUser(userPendingDeletion.id, adminActor);
+      // O servidor confirmou a exclusão. Limpa também as cópias futuras deste
+      // profissional no navegador atual; reservas de hoje e passadas são mantidas.
+      removeFutureStoredBookingsForProfessional(userPendingDeletion.id);
       addToast(`Profissional ${userPendingDeletion.name} foi excluído(a) com sucesso do aplicativo!`, 'success');
       setUserPendingDeletion(null);
       setSelectedProfToDelete('');
