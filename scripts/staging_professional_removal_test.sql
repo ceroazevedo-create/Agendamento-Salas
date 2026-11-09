@@ -40,13 +40,13 @@ BEGIN
   SELECT p.id INTO v_professional_id
   FROM public.profiles p
   JOIN public.professionals pr ON pr.user_id = p.id
-  WHERE lower(p.email) = 'teste@teste.com.br'
+  WHERE lower(p.email) = 'teste.historico@teste.com.br'
     AND lower(p.role) = 'professional'
     AND upper(p.status) = 'ACTIVE'
     AND upper(pr.status) = 'ACTIVE';
 
   IF v_professional_id IS NULL THEN
-    RAISE EXCEPTION 'Teste interrompido: o usuário temporário teste@teste.com.br não existe ou não está ativo em profiles e professionals.';
+    RAISE EXCEPTION 'Teste interrompido: o usuário temporário teste.historico@teste.com.br não existe ou não está ativo em profiles e professionals.';
   END IF;
 
   SELECT id INTO v_room_id
