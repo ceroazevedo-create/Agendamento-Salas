@@ -8,14 +8,14 @@ LANGUAGE SQL
 STABLE
 SECURITY DEFINER
 SET search_path = public, pg_temp
-AS $
+AS $$
   SELECT EXISTS (
     SELECT 1
     FROM public.profiles
     WHERE id = auth.uid()
       AND UPPER(COALESCE(status, '')) = 'ACTIVE'
   );
-$;
+$$;
 
 REVOKE ALL ON FUNCTION public.is_active_user() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.is_active_user() TO authenticated, service_role;
@@ -23,7 +23,7 @@ GRANT EXECUTE ON FUNCTION public.is_active_user() TO authenticated, service_role
 -- Políticas RESTRICTIVE são combinadas com AND às políticas permissivas atuais.
 -- Assim, preservam-se as regras de cada tabela, mas nenhum perfil INACTIVE
 -- consegue consultar ou alterar dados via API usando um token antigo.
-DO $
+DO $$
 DECLARE
   v_table TEXT;
 BEGIN
@@ -50,7 +50,7 @@ BEGIN
     );
   END LOOP;
 END;
-$;
+$$;
 
 -- A operação é chamada exclusivamente pelo endpoint administrativo com service_role.
 CREATE OR REPLACE FUNCTION public.admin_remove_professional(
