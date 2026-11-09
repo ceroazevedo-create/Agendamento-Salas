@@ -35,15 +35,18 @@ BEGIN
     RAISE EXCEPTION 'Teste interrompido: não existe administrador ativo na homologação.';
   END IF;
 
+  -- Usa exclusivamente o usuário temporário criado para esta homologação.
+  -- Não seleciona nem altera profissionais reais.
   SELECT p.id INTO v_professional_id
   FROM public.profiles p
   JOIN public.professionals pr ON pr.user_id = p.id
-  WHERE lower(p.role) = 'professional' AND upper(p.status) = 'ACTIVE'
-  ORDER BY p.created_at DESC
-  LIMIT 1;
+  WHERE lower(p.email) = 'teste@teste.com.br'
+    AND lower(p.role) = 'professional'
+    AND upper(p.status) = 'ACTIVE'
+    AND upper(pr.status) = 'ACTIVE';
 
   IF v_professional_id IS NULL THEN
-    RAISE EXCEPTION 'Teste interrompido: não existe profissional ativo com cadastro operacional na homologação.';
+    RAISE EXCEPTION 'Teste interrompido: o usuário temporário teste@teste.com.br não existe ou não está ativo em profiles e professionals.';
   END IF;
 
   SELECT id INTO v_room_id
