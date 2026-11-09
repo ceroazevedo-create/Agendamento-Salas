@@ -56,6 +56,33 @@ BEGIN
     RAISE EXCEPTION 'Teste interrompido: não existe sala ativa na homologação.';
   END IF;
 
+  IF has_function_privilege('authenticated', 'public.admin_remove_professional(uuid,uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FALHA DE SEGURANÇA: authenticated consegue executar admin_remove_professional.';
+  END IF;
+
+  IF has_function_privilege('authenticated', 'public.execute_admin_full_restore(jsonb,uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FALHA DE SEGURANÇA: authenticated consegue executar a restauração administrativa.';
+  END IF;
+
+  IF has_function_privilege('authenticated', 'public.acquire_room_date_locks(jsonb)', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.acquire_room_date_lock(text,date)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FALHA DE SEGURANÇA: authenticated consegue executar funções internas de advisory lock.';
+  END IF;
+
+  IF NOT has_function_privilege('authenticated', 'public.create_recurring_series(text,uuid,uuid,text,integer,integer,text,text,text,date[],boolean,text,text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'FALHA DE REGRESSÃO: RPC de recorrência perdeu a permissão necessária para authenticated.';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'booking_idempotency_keys'
+      AND policyname = 'Somente perfis ativos acessam booking_idempotency_keys'
+      AND permissive = 'RESTRICTIVE'
+  ) THEN
+    RAISE EXCEPTION 'FALHA DE SEGURANÇA: política RLS restritiva não aplicada à tabela booking_idempotency_keys.';
+  END IF;
+
   SELECT d::DATE INTO v_future_date
   FROM generate_series(v_today + 30, v_today + 365, INTERVAL '1 day') AS g(d)
   WHERE EXTRACT(DOW FROM d) <> 0
@@ -144,6 +171,16 @@ BEGIN
 
   IF EXISTS (SELECT 1 FROM public.professionals WHERE user_id = v_professional_id) THEN
     RAISE EXCEPTION 'FALHA: o cadastro operacional do profissional continua presente.';
+  END IF;
+
+  PERFORM set_config('request.jwt.claim.sub', v_professional_id::TEXT, true);
+  IF public.is_active_user() THEN
+    RAISE EXCEPTION 'FALHA DE SEGURANÇA: is_active_user retornou true para o profissional inativo.';
+  END IF;
+
+  PERFORM set_config('request.jwt.claim.sub', v_admin_id::TEXT, true);
+  IF NOT public.is_active_user() THEN
+    RAISE EXCEPTION 'FALHA: is_active_user bloqueou indevidamente o administrador ativo.';
   END IF;
 
   IF NOT EXISTS (
