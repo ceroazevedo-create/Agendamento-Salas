@@ -104,6 +104,32 @@ export const saveStoredBookings = (bookings: Booking[]) => {
   localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(cleaned));
 };
 
+// Remove do armazenamento local somente as reservas futuras de um profissional
+// cuja exclusão já foi confirmada pelo servidor. Reservas de hoje e anteriores
+// permanecem disponíveis como histórico.
+export const removeFutureStoredBookingsForProfessional = (userId: string): number => {
+  if (typeof window === 'undefined' || !userId) return 0;
+
+  const todayParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date());
+  const part = (type: string) => todayParts.find(item => item.type === type)?.value || '';
+  const today = `${part('year')}-${part('month')}-${part('day')}`;
+
+  const current = getStoredBookings();
+  const retained = current.filter(booking => {
+    const bookingDate = String(booking.date || '').split('T')[0].trim();
+    return !(String(booking.userId) === userId && bookingDate > today);
+  });
+  const removed = current.length - retained.length;
+
+  if (removed > 0) saveStoredBookings(retained);
+  return removed;
+};
+
 // ================= BLOCKED SLOTS =================
 export const getStoredBlockedSlots = (): BlockedSlot[] => {
   ensureSeededData();
