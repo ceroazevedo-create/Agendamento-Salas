@@ -11,6 +11,7 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_target_role TEXT;
+  v_target_status TEXT;
   v_target_name TEXT;
   v_admin_role TEXT;
   v_admin_status TEXT;
@@ -33,8 +34,8 @@ BEGIN
     RAISE EXCEPTION 'Operação permitida somente para administrador ativo.';
   END IF;
 
-  SELECT role, full_name
-    INTO v_target_role, v_target_name
+  SELECT role, status, full_name
+    INTO v_target_role, v_target_status, v_target_name
   FROM public.profiles
   WHERE id = p_user_id
   FOR UPDATE;
@@ -45,6 +46,21 @@ BEGIN
 
   IF LOWER(COALESCE(v_target_role, '')) <> 'professional' THEN
     RAISE EXCEPTION 'Não é permitido excluir contas que não sejam profissionais.';
+  END IF;
+
+  -- Idempotência: se a transação anterior já retirou o cadastro e marcou
+  -- o perfil como inativo, uma nova chamada apenas permite concluir/repetir
+  -- a etapa de desativação no Supabase Auth, sem duplicar a auditoria.
+  IF UPPER(COALESCE(v_target_status, '')) = 'INACTIVE'
+     AND NOT EXISTS (
+       SELECT 1 FROM public.professionals WHERE user_id = p_user_id
+     ) THEN
+    RETURN jsonb_build_object(
+      'success', true,
+      'already_removed', true,
+      'deleted_future_bookings', 0,
+      'preserved_historical_bookings', 0
+    );
   END IF;
 
   -- Exclui todas as reservas com data posterior à data atual de São Paulo.
