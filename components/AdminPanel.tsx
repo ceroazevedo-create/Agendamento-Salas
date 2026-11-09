@@ -134,6 +134,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
 
   // Delete Professional State (Exclusão no menu Configurações)
   const [selectedProfToDelete, setSelectedProfToDelete] = useState<string>('');
+  const [deletionUsers, setDeletionUsers] = useState<User[]>([]);
   const [userPendingDeletion, setUserPendingDeletion] = useState<User | null>(null);
   const [isDeletingUser, setIsDeletingUser] = useState(false);
   const [deleteConfirmCheckbox, setDeleteConfirmCheckbox] = useState(false);
@@ -178,9 +179,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
   const loadAdminData = async () => {
     setIsLoading(true);
     try {
-      const [bookingsRes, profilesRes, roomsRes, blocksRes, settingsRes] = await Promise.allSettled([
+      const [bookingsRes, profilesRes, deletionProfilesRes, roomsRes, blocksRes, settingsRes] = await Promise.allSettled([
         bookingService.getAllBookingsWithCancelled(),
         authService.getAllProfiles(),
+        authService.getAllProfiles(true),
         bookingService.getRooms(),
         bookingService.getBlockedSlots(),
         bookingService.getGlobalSettings()
@@ -202,6 +204,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
           console.warn('Aviso: falha ao carregar perfis do Supabase, usando local:', profilesRes.reason);
         }
         setUsers(getStoredUsers());
+      }
+
+      if (deletionProfilesRes.status === 'fulfilled' && deletionProfilesRes.value) {
+        setDeletionUsers(deletionProfilesRes.value);
+      } else {
+        if (deletionProfilesRes.status === 'rejected') {
+          console.warn('Aviso: falha ao carregar perfis para exclusão:', deletionProfilesRes.reason);
+        }
+        setDeletionUsers(getStoredUsers());
       }
 
       if (roomsRes.status === 'fulfilled' && roomsRes.value) {
@@ -1924,7 +1935,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                     className="w-full px-4 py-3 bg-white border-2 border-teal-200 rounded-2xl text-xs sm:text-sm font-semibold text-gray-800 focus:outline-none focus:border-teal-600 transition-all shadow-xs"
                   >
                     <option value="">-- Selecione o profissional que esqueceu a senha --</option>
-                    {users.filter(u => u.role === 'USER').map(p => (
+                    {deletionUsers.filter(u => u.role === 'USER').map(p => (
                       <option key={p.id} value={p.id}>
                         {p.name} — {p.profession || 'Terapeuta'} ({p.email})
                       </option>
@@ -2089,7 +2100,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onUpdateUse
                 </div>
 
                 {selectedProfToDelete && (() => {
-                  const targetProf = users.find(u => u.id === selectedProfToDelete);
+                  const targetProf = deletionUsers.find(u => u.id === selectedProfToDelete);
                   if (!targetProf) return null;
 
                   const profBookings = bookings.filter(b => b.userId === targetProf.id && b.paymentStatus !== 'CANCELLED');
