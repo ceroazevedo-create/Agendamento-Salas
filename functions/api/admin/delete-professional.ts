@@ -120,7 +120,7 @@ export const onRequestPost = async (context: PagesFunctionContext<Env>): Promise
 
     // Soft delete preserva profiles e as FKs do histórico. Se a tentativa anterior
     // já concluiu o Auth, deleted_at evita repetir a operação.
-    if (!authBefore.user.deleted_at) {
+    if (!(authBefore.user as any).deleted_at) {
       const { error: authDeleteError } = await admin.auth.admin.deleteUser(userId, true);
       if (authDeleteError) {
         return jsonResponse({
