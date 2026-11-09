@@ -526,18 +526,25 @@ export const authService = {
         if (error) {
           console.warn('Aviso ao consultar perfis do Supabase:', error);
         } else if (profiles) {
-          const { data: professionals } = await supabase
+          const { data: professionals, error: professionalsError } = await supabase
             .from('professionals')
             .select('*');
 
+          if (professionalsError) {
+            throw professionalsError;
+          }
+
           const profsMap = new Map((professionals || []).map(p => [p.user_id, p]));
           const allMappedUsers = profiles.map(p => mapProfileToUser(p, profsMap.get(p.id)));
-          // A lista operacional continua ocultando inativos. A tela de exclusão
-          // pode solicitá-los explicitamente para concluir uma remoção iniciada
-          // por uma desativação anterior.
+          // A lista de exclusão inclui profissionais ativos e inativos que ainda
+          // possuem cadastro operacional. O perfil técnico preservado após a
+          // exclusão não possui mais linha em professionals e não deve reaparecer.
           const activeUsers = allMappedUsers.filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
+          const eligibleForDeletion = allMappedUsers.filter(user =>
+            user.role === 'ADMIN' || profsMap.has(user.id)
+          );
           saveStoredUsers(activeUsers);
-          return includeInactive ? allMappedUsers : activeUsers;
+          return includeInactive ? eligibleForDeletion : activeUsers;
         }
       } catch (err) {
         console.warn('Exceção ao obter perfis do Supabase, utilizando cache local:', err);
@@ -545,6 +552,9 @@ export const authService = {
     }
 
     const storedUsers = getStoredUsers();
+    // Sem confirmação do banco, não exibir cache antigo na lista destrutiva:
+    // ele pode conter perfis técnicos já excluídos.
+    if (includeInactive && isSupabaseConfigured) return [];
     return includeInactive
       ? storedUsers
       : storedUsers.filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
