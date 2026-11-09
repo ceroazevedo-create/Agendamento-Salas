@@ -536,12 +536,14 @@ export const authService = {
 
           const profsMap = new Map((professionals || []).map(p => [p.user_id, p]));
           const allMappedUsers = profiles.map(p => mapProfileToUser(p, profsMap.get(p.id)));
-          // A lista de exclusão inclui profissionais ativos e inativos que ainda
-          // possuem cadastro operacional. O perfil técnico preservado após a
-          // exclusão não possui mais linha em professionals e não deve reaparecer.
+          // A lista de exclusão inclui profissionais ativos mesmo quando falta
+          // o registro complementar em professionals. Também mantém visíveis
+          // profissionais inativos que ainda possuem cadastro operacional.
+          // Perfis inativos sem esse cadastro não reaparecem após a exclusão.
           const activeUsers = allMappedUsers.filter(user => user.role === 'ADMIN' || user.status !== 'INACTIVE');
           const eligibleForDeletion = allMappedUsers.filter(user =>
-            user.role === 'ADMIN' || profsMap.has(user.id)
+            user.role === 'ADMIN' ||
+            (user.role === 'USER' && (user.status !== 'INACTIVE' || profsMap.has(user.id)))
           );
           saveStoredUsers(activeUsers);
           return includeInactive ? eligibleForDeletion : activeUsers;
