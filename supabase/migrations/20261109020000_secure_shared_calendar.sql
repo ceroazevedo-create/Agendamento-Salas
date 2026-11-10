@@ -56,10 +56,8 @@ BEGIN
     b.total_hours,
     CASE WHEN v_admin OR b.professional_id = v_uid THEN b.hourly_rate ELSE NULL END,
     CASE WHEN v_admin OR b.professional_id = v_uid THEN b.total_amount ELSE NULL END,
-    CASE WHEN v_admin OR b.professional_id = v_uid THEN b.payment_status ELSE
-      CASE WHEN b.payment_status = 'CANCELLED' OR b.status = 'cancelled' THEN 'CANCELLED' ELSE 'PENDING' END
-    END,
-    b.status,
+    CASE WHEN v_admin OR b.professional_id = v_uid THEN b.payment_status ELSE NULL END,
+    CASE WHEN v_admin OR b.professional_id = v_uid THEN b.status ELSE 'confirmed' END,
     b.period_shift,
     b.period_name,
     CASE WHEN v_admin OR b.professional_id = v_uid THEN b.client_id ELSE NULL END,
@@ -68,11 +66,11 @@ BEGIN
     CASE WHEN v_admin OR b.professional_id = v_uid THEN b.paid_at ELSE NULL END,
     CASE WHEN v_admin OR b.professional_id = v_uid THEN b.paid_notes ELSE NULL END,
     CASE WHEN v_admin OR b.professional_id = v_uid THEN b.paid_by_admin ELSE NULL END,
-    b.created_at,
-    NULLIF(to_jsonb(b)->>'recurrence_id', '')::text,
-    NULLIF(to_jsonb(b)->>'recurrence_rule', '')::text,
-    NULLIF(to_jsonb(b)->>'recurrence_index', '')::integer,
-    NULLIF(to_jsonb(b)->>'recurrence_total', '')::integer
+    CASE WHEN v_admin OR b.professional_id = v_uid THEN b.created_at ELSE NULL END,
+    CASE WHEN v_admin OR b.professional_id = v_uid THEN b.recurrence_id::text ELSE NULL END,
+    CASE WHEN v_admin OR b.professional_id = v_uid THEN b.recurrence_rule ELSE NULL END,
+    CASE WHEN v_admin OR b.professional_id = v_uid THEN b.recurrence_index ELSE NULL END,
+    CASE WHEN v_admin OR b.professional_id = v_uid THEN b.recurrence_total ELSE NULL END
   FROM public.bookings b
   JOIN public.profiles p ON p.id = b.professional_id AND p.status = 'ACTIVE'
   LEFT JOIN public.clients c ON c.id = b.client_id
