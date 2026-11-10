@@ -17,8 +17,10 @@ function mapDbBookingToBooking(b: any, profilesMap?: Map<string, any>): Booking 
   const hour = Number(b.hour !== undefined ? b.hour : (b.start_time !== undefined ? b.start_time : 7));
   const duration = Number(b.duration_hours || b.total_hours || (b.end_time ? Number(b.end_time) - hour : 1));
   const endHour = Number(b.end_time_hour || b.end_time || (hour + duration));
-  const price = Number(b.price_at_booking || b.hourly_rate || 40.0);
-  const total = Number(b.total_amount || (price * duration));
+  // Campos financeiros nulos na agenda compartilhada permanecem zerados; nunca estimar valores de terceiros.
+  const rawPrice = b.price_at_booking ?? b.hourly_rate;
+  const price = rawPrice == null ? 0 : Number(rawPrice);
+  const total = b.total_amount == null ? 0 : Number(b.total_amount);
 
   // Normalizar data (remover T00:00:00 se presente)
   const rawDate = String(b.date || b.booking_date || '');
