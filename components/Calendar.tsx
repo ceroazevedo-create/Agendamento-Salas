@@ -120,7 +120,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
         });
         setBookings(cleaned);
       } else {
-        setBookings(getStoredBookings().filter(b => b.paymentStatus !== 'CANCELLED'));
+        setBookings(getStoredBookings().filter(b => (isAdmin || b.userId === user.id) && b.paymentStatus !== 'CANCELLED'));
       }
 
       if (blocksRes.status === 'fulfilled' && blocksRes.value) {
@@ -164,7 +164,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
       }
     } catch (err: any) {
       console.error('Erro ao carregar dados do calendário:', err);
-      setBookings(getStoredBookings().filter(b => b.paymentStatus !== 'CANCELLED'));
+      setBookings(getStoredBookings().filter(b => (isAdmin || b.userId === user.id) && b.paymentStatus !== 'CANCELLED'));
       setBlockedSlots(getStoredBlockedSlots());
     }
   };
