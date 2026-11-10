@@ -286,9 +286,15 @@ export const bookingService = {
         return all.filter(b => b.userId === userId);
       } catch (err) {
         console.warn('Erro ao carregar reservas do profissional do Supabase, usando local:', err);
+        // Em modo remoto, o cache local nunca pode revelar reservas de outro profissional.
+        const { data: authData } = await supabase.auth.getUser();
+        const currentUserId = authData.user?.id;
+        if (!currentUserId || userId !== currentUserId) return [];
+        return getStoredBookings().filter(b => b.userId === currentUserId);
       }
     }
 
+    // No modo exclusivamente local, mantém o comportamento atual.
     const all = getStoredBookings();
     return all.filter(b => b.userId === userId);
   },
