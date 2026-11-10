@@ -200,6 +200,21 @@ export function generateCandidateDates(config: RecurrenceConfig): string[] {
   return Array.from(new Set(dates)).sort();
 }
 
+
+/** Retorna o motivo do bloqueio quando a data é feriado não liberado. */
+export function getHolidayConflictReason(
+  date: string,
+  settings: { allowHolidaysGlobal?: boolean; unblockedHolidays?: string[] }
+): string | undefined {
+  const normalizedDate = String(date).split('T')[0];
+  const monthDay = normalizedDate.slice(5);
+  const isHoliday = HOLIDAYS.includes(monthDay) || HOLIDAYS.includes(normalizedDate);
+  const isUnblocked = Boolean(settings.allowHolidaysGlobal)
+    || (settings.unblockedHolidays || []).includes(monthDay)
+    || (settings.unblockedHolidays || []).includes(normalizedDate);
+  return isHoliday && !isUnblocked ? 'Feriado bloqueado pela administração.' : undefined;
+}
+
 /**
  * Realiza a prévia e a verificação completa de disponibilidade de todas as ocorrências
  * da série recorrente, calculando preços, conflitos e resumo financeiro.
@@ -214,6 +229,7 @@ export async function previewRecurringSeries(params: {
   config: RecurrenceConfig;
 }): Promise<RecurrencePreviewSummary> {
   const dates = generateCandidateDates(params.config);
+  const holidaySettings = await bookingService.getGlobalSettings();
 
   // Busca tarifas da sala
   let hourlyRate = 40.0;
@@ -308,6 +324,14 @@ export async function previewRecurringSeries(params: {
           : `O atendimento encerra às ${maxClosing}:00.`,
         price
       });
+      continue;
+    }
+
+    // Feriados seguem a mesma regra do calendário: bloqueados por padrão,
+    // exceto quando liberados globalmente ou individualmente pelo administrador.
+    const holidayReason = getHolidayConflictReason(date, holidaySettings);
+    if (holidayReason) {
+      occurrences.push({ date, dayOfWeek, startHour, endHour, hasConflict: true, conflictReason: holidayReason, price });
       continue;
     }
 
