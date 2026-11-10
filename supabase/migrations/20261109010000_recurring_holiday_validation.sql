@@ -367,6 +367,8 @@ BEGIN
     INTO v_allow_holidays_global, v_unblocked_holidays
   FROM public.settings
   WHERE id = 'global';
+  v_allow_holidays_global := COALESCE(v_allow_holidays_global, FALSE);
+  v_unblocked_holidays := COALESCE(v_unblocked_holidays, '{}'::TEXT[]);
 
   -- 7.7 AVALIAÇÃO DE CADA OCORRÊNCIA INDIVIDUALMENTE CONFORME O DIA DA SEMANA
   FOREACH v_cur_date IN ARRAY v_sorted_dates LOOP
