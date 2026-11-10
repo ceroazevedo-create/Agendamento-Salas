@@ -96,7 +96,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$;
+$$;
 
 DROP TRIGGER IF EXISTS trg_check_booking_conflict ON public.bookings;
 CREATE TRIGGER trg_check_booking_conflict
