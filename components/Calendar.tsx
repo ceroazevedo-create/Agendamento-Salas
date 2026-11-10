@@ -776,7 +776,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                           ? `Sua Reserva ${b.clientName ? `— ${b.clientName}` : ''}`
                           : isAdmin
                           ? `${b.userName} ${b.clientName ? `(${b.clientName})` : ''}`
-                          : 'Indisponível (Reservado)'
+                          : `${b.userName || 'Profissional'} — Reservado`
                         }
                       </span>
                     </div>
@@ -979,7 +979,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                                 ? (slot.booking.clientName || 'Sua Reserva')
                                 : isAdmin
                                 ? (slot.booking.userName?.split(' ')[0] || 'Profissional')
-                                : 'Indisponível'
+                                : (slot.booking.userName || 'Profissional')
                               }
                             </span>
                           </div>
