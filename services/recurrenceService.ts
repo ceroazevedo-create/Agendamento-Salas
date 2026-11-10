@@ -6,7 +6,7 @@ import {
 import { bookingService } from './bookingService';
 import { 
   getClosingHourForDate, SATURDAY_HOURS_END, 
-  INITIAL_PERIOD_RATES, getPeriodConfig 
+  INITIAL_PERIOD_RATES, getPeriodConfig, HOLIDAYS 
 } from '../constants';
 import { 
   addDays, addWeeks, addMonths, format, 
