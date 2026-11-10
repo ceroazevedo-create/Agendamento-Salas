@@ -209,7 +209,7 @@ export const bookingService = {
       try {
         const [bookRes, profRes] = await Promise.all([
           supabase.from('bookings').select('*').in('id', ids),
-          supabase.from('profiles').select('*')
+          supabase.from('profiles').select('id,full_name')
         ]);
 
         if (bookRes.data && Array.isArray(bookRes.data)) {
@@ -224,8 +224,11 @@ export const bookingService = {
       }
     }
 
+    const { data: authData } = await supabase.auth.getUser();
+    const currentUserId = authData.user?.id;
+    if (!currentUserId) return [];
     const localBookings = getStoredBookings();
-    return localBookings.filter(b => ids.includes(b.id));
+    return localBookings.filter(b => ids.includes(b.id) && b.userId === currentUserId);
   },
 
   // Retorna inclusive os cancelados se necessário para auditoria
@@ -268,7 +271,11 @@ export const bookingService = {
       }
     }
 
-    return getStoredBookings();
+    // Em falha remota, não usar o cache global: ele pode conter dados de terceiros.
+    const { data: authData } = await supabase.auth.getUser();
+    const currentUserId = authData.user?.id;
+    if (!currentUserId) return [];
+    return getStoredBookings().filter(b => b.userId === currentUserId);
   },
 
   // Busca agendamentos de um profissional específico
