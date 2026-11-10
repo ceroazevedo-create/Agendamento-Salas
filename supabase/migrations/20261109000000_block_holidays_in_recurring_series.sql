@@ -257,6 +257,9 @@ BEGIN
     INTO v_allow_holidays_global, v_unblocked_holidays
   FROM public.settings
   WHERE id = 'global';
+  -- SELECT INTO sem linha retorna NULL; manter o padrão seguro de feriado bloqueado.
+  v_allow_holidays_global := COALESCE(v_allow_holidays_global, FALSE);
+  v_unblocked_holidays := COALESCE(v_unblocked_holidays, ARRAY[]::TEXT[]);
 
   -- 7.7 AVALIAÇÃO DE CADA OCORRÊNCIA INDIVIDUALMENTE CONFORME O DIA DA SEMANA
   FOREACH v_cur_date IN ARRAY v_sorted_dates LOOP
