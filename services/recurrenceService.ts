@@ -5,7 +5,7 @@ import {
 } from '../types';
 import { bookingService } from './bookingService';
 import { 
-  getClosingHourForDate, SATURDAY_HOURS_END, 
+  getClosingHourForDate, SATURDAY_HOURS_END, HOLIDAYS,
   INITIAL_PERIOD_RATES, getPeriodConfig 
 } from '../constants';
 import { 
@@ -19,6 +19,25 @@ import { supabase, isSupabaseConfigured, translateSupabaseError } from './supaba
  * Gera a lista ordenada de datas candidatas no formato YYYY-MM-DD
  * de acordo com a frequência, dias da semana e critérios de encerramento.
  */
+/**
+ * Identifica feriados nacionais bloqueados, respeitando as liberações do administrador.
+ * As chaves aceitas seguem o formato já utilizado nas configurações: MM-DD ou YYYY-MM-DD.
+ */
+export function isBlockedHoliday(
+  date: string,
+  config: { allowHolidaysGlobal?: boolean; unblockedHolidays?: string[] }
+): boolean {
+  const normalizedDate = String(date || '').slice(0, 10);
+  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(normalizedDate)) return false;
+
+  const monthDay = normalizedDate.slice(5);
+  const isHoliday = HOLIDAYS.includes(monthDay) || HOLIDAYS.includes(normalizedDate);
+  if (!isHoliday || config.allowHolidaysGlobal) return false;
+
+  const unblocked = Array.isArray(config.unblockedHolidays) ? config.unblockedHolidays : [];
+  return !unblocked.includes(monthDay) && !unblocked.includes(normalizedDate);
+}
+
 export function generateCandidateDates(config: RecurrenceConfig): string[] {
   const { frequency, startDate, endType, endDate, occurrencesCount = 4, weekdays } = config;
   const dates: string[] = [];
@@ -214,6 +233,8 @@ export async function previewRecurringSeries(params: {
   config: RecurrenceConfig;
 }): Promise<RecurrencePreviewSummary> {
   const dates = generateCandidateDates(params.config);
+  // Carrega as liberações administrativas de feriados uma única vez para toda a prévia.
+  const holidayConfig = await bookingService.getGlobalSettings();
 
   // Busca tarifas da sala
   let hourlyRate = 40.0;
@@ -279,6 +300,20 @@ export async function previewRecurringSeries(params: {
       duration = params.durationHours || 1;
       endHour = startHour + duration;
       price = duration * hourlyRate;
+    }
+
+    // Feriados nacionais bloqueados respeitam as liberações administrativas globais e por data.
+    if (isBlockedHoliday(date, holidayConfig)) {
+      occurrences.push({
+        date,
+        dayOfWeek,
+        startHour,
+        endHour,
+        hasConflict: true,
+        conflictReason: 'Esta data é feriado nacional e está bloqueada pela administração.',
+        price
+      });
+      continue;
     }
 
     // Verificação de regras de dia/horário da sala
