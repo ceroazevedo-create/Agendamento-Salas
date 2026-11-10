@@ -914,7 +914,11 @@ CREATE POLICY "clients_delete" ON public.clients FOR DELETE USING (auth.uid() = 
 CREATE POLICY "rooms_select" ON public.rooms FOR SELECT TO authenticated USING (true);
 CREATE POLICY "rooms_admin" ON public.rooms FOR ALL TO authenticated USING (public.is_admin());
 
-CREATE POLICY "bookings_select" ON public.bookings FOR SELECT TO authenticated USING (true);
+CREATE POLICY "bookings_select" ON public.bookings FOR SELECT TO authenticated USING (auth.uid() = professional_id OR public.is_admin());
+
+-- Agenda compartilhada: profissionais recebem somente sala, data, horários e nome do profissional.
+-- Dados de cliente e cobrança são retornados apenas ao proprietário da reserva ou ao admin
+-- pela função SECURITY DEFINER public.get_calendar_bookings().
 CREATE POLICY "bookings_insert" ON public.bookings FOR INSERT TO authenticated WITH CHECK (auth.uid() = professional_id OR public.is_admin());
 CREATE POLICY "bookings_update" ON public.bookings FOR UPDATE TO authenticated USING (auth.uid() = professional_id OR public.is_admin());
 
