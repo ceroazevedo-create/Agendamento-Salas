@@ -88,6 +88,7 @@ GRANT EXECUTE ON FUNCTION public.get_calendar_bookings() TO authenticated;
 -- A tabela deixa de expor reservas completas de terceiros por SELECT direto.
 -- Remove também a política legada que liberava leitura irrestrita (inclusive anon).
 DROP POLICY IF EXISTS "Leitura de locações para visualização de agenda" ON public.bookings;
+DROP POLICY IF EXISTS "Visualização de locações na agenda" ON public.bookings;
 DROP POLICY IF EXISTS bookings_select ON public.bookings;
 CREATE POLICY bookings_select ON public.bookings
 FOR SELECT TO authenticated
