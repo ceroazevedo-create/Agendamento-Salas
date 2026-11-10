@@ -17,8 +17,10 @@ function mapDbBookingToBooking(b: any, profilesMap?: Map<string, any>): Booking 
   const hour = Number(b.hour !== undefined ? b.hour : (b.start_time !== undefined ? b.start_time : 7));
   const duration = Number(b.duration_hours || b.total_hours || (b.end_time ? Number(b.end_time) - hour : 1));
   const endHour = Number(b.end_time_hour || b.end_time || (hour + duration));
-  const price = Number(b.price_at_booking || b.hourly_rate || 40.0);
-  const total = Number(b.total_amount || (price * duration));
+  // Campos financeiros nulos na agenda compartilhada permanecem zerados; nunca estimar valores de terceiros.
+  const rawPrice = b.price_at_booking ?? b.hourly_rate;
+  const price = rawPrice == null ? 0 : Number(rawPrice);
+  const total = b.total_amount == null ? 0 : Number(b.total_amount);
 
   // Normalizar data (remover T00:00:00 se presente)
   const rawDate = String(b.date || b.booking_date || '');
@@ -165,90 +167,37 @@ export const bookingService = {
 
     if (isSupabaseConfigured) {
       try {
-        const [bookRes, profRes] = await Promise.all([
-          supabase.from('bookings').select('*'),
-          supabase.from('profiles').select('*')
-        ]);
-
-        if (bookRes.data && Array.isArray(bookRes.data)) {
-          const profilesMap = new Map<string, any>();
-          if (profRes.data) {
-            profRes.data.forEach((p: any) => profilesMap.set(p.id, p));
-          }
-
-          const localMap = new Map<string, Booking>();
-          localBookings.forEach(lb => localMap.set(String(lb.id), lb));
-
-          const activeRemote = bookRes.data
-            .filter((b: any) => {
-              const status = (b.payment_status || b.status || '').toUpperCase();
-              return status !== 'CANCELLED';
-            })
-            .map((b: any) => {
-              const mapped = mapDbBookingToBooking(b, profilesMap);
-              const localMatch = localMap.get(mapped.id);
-              if (localMatch) {
-                return {
-                  ...mapped,
-                  clientName: localMatch.clientName || mapped.clientName,
-                  notes: localMatch.notes || mapped.notes,
-                  paymentStatus: localMatch.paymentStatus || mapped.paymentStatus,
-                  durationHours: localMatch.durationHours || mapped.durationHours,
-                  endTimeHour: localMatch.endTimeHour || mapped.endTimeHour,
-                  periodShift: localMatch.periodShift || mapped.periodShift,
-                  periodName: localMatch.periodName || mapped.periodName,
-                  type: localMatch.type || mapped.type
-                };
-              }
-              return mapped;
-            });
-
-          // PRESERVA RESERVAS LOCAIS QUE AINDA NÃO FORAM SINCRONIZADAS COM O SUPABASE
-          const remoteIds = new Set(activeRemote.map(b => String(b.id)));
-          const unSyncedLocal = localActive.filter(lb => {
-            if (remoteIds.has(String(lb.id))) return false;
-
-            // Só mantém uma reserva exclusivamente local quando a consulta de perfis
-            // confirmou que seu proprietário ainda existe e está ativo. Se o perfil
-            // não veio do servidor (inativo/removido), não podemos tratar a cópia local
-            // como uma reserva pendente: isso ressuscitaria reservas já excluídas.
-            if (profRes.error || !Array.isArray(profRes.data)) return false;
-            const ownerProfile = profilesMap.get(String(lb.userId || ''));
-            if (!ownerProfile || String(ownerProfile.status || '').toUpperCase() !== 'ACTIVE') {
-              return false;
-            }
-
-            // Filtro de segurança: remove reservas falsas de teste (Sala 2 em 14/10 às 18h e 19h)
-            const isSala2 = String(lb.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
-            const isTargetDate = String(lb.date || '').split('T')[0] === '2026-10-14';
-            const is18or19 = (lb.hour === 18 || lb.hour === 19) ||
-              (Number(lb.hour) <= 18 && Number(lb.endTimeHour || (lb.hour + (lb.durationHours || 1))) > 18) ||
-              (Number(lb.hour) <= 19 && Number(lb.endTimeHour || (lb.hour + (lb.durationHours || 1))) > 19);
-            if (isSala2 && isTargetDate && is18or19) return false;
-
-            const overlapsWithRemote = activeRemote.some(rb => 
-              rb.roomId.toLowerCase().trim() === lb.roomId.toLowerCase().trim() &&
-              rb.date === lb.date &&
-              Math.max(rb.hour, lb.hour) < Math.min(rb.endTimeHour, lb.endTimeHour)
-            );
-            return !overlapsWithRemote;
+        const { data, error } = await supabase.rpc('get_calendar_bookings');
+        if (error) throw error;
+        if (Array.isArray(data)) {
+          const { data: authData } = await supabase.auth.getUser();
+          const currentUserId = authData.user?.id;
+          const localMap = new Map(localBookings.map(b => [String(b.id), b]));
+          const remote = data.map((row: any) => {
+            const mapped = mapDbBookingToBooking(row);
+            // Cópias locais só podem complementar a reserva do próprio usuário.
+            const local = mapped.userId === currentUserId ? localMap.get(mapped.id) : undefined;
+            return local ? {
+              ...mapped,
+              clientName: mapped.clientName || local.clientName,
+              notes: mapped.notes || local.notes,
+              durationHours: mapped.durationHours || local.durationHours,
+              endTimeHour: mapped.endTimeHour || local.endTimeHour,
+              periodShift: mapped.periodShift || local.periodShift,
+              periodName: mapped.periodName || local.periodName,
+              type: mapped.type || local.type
+            } : mapped;
           });
-
-          // Consolida remotas com locais ativas
-          const combined = [...activeRemote, ...unSyncedLocal].filter(b => {
-            const isSala2 = String(b.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
-            const isTargetDate = String(b.date || '').split('T')[0] === '2026-10-14';
-            const is18or19 = (b.hour === 18 || b.hour === 19) ||
-              (Number(b.hour) <= 18 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 18) ||
-              (Number(b.hour) <= 19 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 19);
-            return !(isSala2 && isTargetDate && is18or19);
-          });
-          saveStoredBookings(combined);
-
-          return combined;
+          // Não ressuscita reservas locais ausentes do servidor: a RPC é a fonte de verdade.
+          saveStoredBookings(remote);
+          return remote;
         }
+        throw new Error('Resposta inválida ao carregar a agenda compartilhada.');
       } catch (err) {
-        console.warn('Erro ao carregar reservas do Supabase, usando local:', err);
+        console.warn('Erro ao carregar agenda segura do Supabase:', err);
+        // Falha fechada: no modo remoto, não exibe reservas locais de terceiros.
+        const { data: authData } = await supabase.auth.getUser();
+        return localActive.filter(b => b.userId === authData.user?.id);
       }
     }
 
@@ -262,7 +211,7 @@ export const bookingService = {
       try {
         const [bookRes, profRes] = await Promise.all([
           supabase.from('bookings').select('*').in('id', ids),
-          supabase.from('profiles').select('*')
+          supabase.from('profiles').select('id,full_name')
         ]);
 
         if (bookRes.data && Array.isArray(bookRes.data)) {
@@ -277,8 +226,11 @@ export const bookingService = {
       }
     }
 
+    const { data: authData } = await supabase.auth.getUser();
+    const currentUserId = authData.user?.id;
+    if (!currentUserId) return [];
     const localBookings = getStoredBookings();
-    return localBookings.filter(b => ids.includes(b.id));
+    return localBookings.filter(b => ids.includes(b.id) && b.userId === currentUserId);
   },
 
   // Retorna inclusive os cancelados se necessário para auditoria
@@ -287,7 +239,7 @@ export const bookingService = {
       try {
         const [bookRes, profRes] = await Promise.all([
           supabase.from('bookings').select('*'),
-          supabase.from('profiles').select('*')
+          supabase.from('profiles').select('id,full_name')
         ]);
 
         if (bookRes.data) {
@@ -321,7 +273,11 @@ export const bookingService = {
       }
     }
 
-    return getStoredBookings();
+    // Em falha remota, não usar o cache global: ele pode conter dados de terceiros.
+    const { data: authData } = await supabase.auth.getUser();
+    const currentUserId = authData.user?.id;
+    if (!currentUserId) return [];
+    return getStoredBookings().filter(b => b.userId === currentUserId);
   },
 
   // Busca agendamentos de um profissional específico
@@ -332,9 +288,15 @@ export const bookingService = {
         return all.filter(b => b.userId === userId);
       } catch (err) {
         console.warn('Erro ao carregar reservas do profissional do Supabase, usando local:', err);
+        // Em modo remoto, o cache local nunca pode revelar reservas de outro profissional.
+        const { data: authData } = await supabase.auth.getUser();
+        const currentUserId = authData.user?.id;
+        if (!currentUserId || userId !== currentUserId) return [];
+        return getStoredBookings().filter(b => b.userId === currentUserId);
       }
     }
 
+    // No modo exclusivamente local, mantém o comportamento atual.
     const all = getStoredBookings();
     return all.filter(b => b.userId === userId);
   },
@@ -392,46 +354,35 @@ export const bookingService = {
           }
         }
 
-        // Verifica reservas na data e sala
-        const { data: existingBookings, error: bookErr } = await supabase
-          .from('bookings')
-          .select('*');
+        // Consulta somente os campos públicos necessários para detectar ocupação.
+        const { data: existingBookings, error: bookErr } = await supabase.rpc('get_calendar_bookings');
 
-        if (!bookErr && existingBookings) {
+        if (!bookErr && Array.isArray(existingBookings)) {
           const normRoom = String(roomId).trim().toLowerCase();
           const normDate = String(date).split('T')[0].trim();
+          const dayBookings = existingBookings.filter((booking: any) =>
+            String(booking.room_id || '').trim().toLowerCase() === normRoom &&
+            String(booking.booking_date || '').split('T')[0].trim() === normDate &&
+            (!excludeBookingId || String(booking.id) !== String(excludeBookingId))
+          );
 
-          const dayBookings = existingBookings.filter((b: any) => {
-            const bRoom = String(b.room_id || '').trim().toLowerCase();
-            const bRawDate = String(b.date || b.booking_date || '');
-            const bDate = bRawDate.includes('T') ? bRawDate.split('T')[0] : bRawDate.trim();
-            const bStatus = (b.payment_status || b.status || '').toUpperCase();
-
-            if (bRoom !== normRoom) return false;
-            if (bDate !== normDate) return false;
-            if (bStatus === 'CANCELLED') return false;
-            if (excludeBookingId && String(b.id) === String(excludeBookingId)) return false;
-            return true;
-          });
-
-          for (const b of dayBookings) {
-            const bStart = Number(b.hour !== undefined ? b.hour : b.start_time);
-            const bDuration = Number(b.duration_hours || b.total_hours || (b.end_time ? Number(b.end_time) - bStart : 1));
-            const bEnd = Number(b.end_time_hour || b.end_time || (bStart + bDuration));
-            const bType = b.type || b.booking_type;
+          for (const booking of dayBookings) {
+            const bStart = Number(booking.start_time);
+            const bEnd = Number(booking.end_time);
+            const periodLabel = booking.period_name
+              ? ` (Período da ${booking.period_name})`
+              : (booking.booking_type === 'PERIOD' && bEnd - bStart >= 14 ? ' (Período Integral)' : '');
 
             if (Math.max(startHour, bStart) < Math.min(endHour, bEnd)) {
-              const periodLabel = b.period_name || b.periodName 
-                ? ` (Período da ${b.period_name || b.periodName})` 
-                : (bType === 'PERIOD' && (bEnd - bStart >= 14) ? ' (Período Integral)' : '');
-              return { 
-                hasConflict: true, 
-                reason: `O horário das ${bStart}:00 às ${bEnd}:00${periodLabel} já está reservado nesta sala.` 
+              return {
+                hasConflict: true,
+                reason: `O horário das ${bStart}:00 às ${bEnd}:00${periodLabel} já está reservado nesta sala.`
               };
             }
           }
           return { hasConflict: false };
         }
+        if (bookErr) throw bookErr;
       } catch (e) {
         console.warn('Erro ao checar conflito no Supabase, checando local:', e);
       }
