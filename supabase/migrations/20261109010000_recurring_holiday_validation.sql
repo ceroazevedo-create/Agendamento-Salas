@@ -1,5 +1,110 @@
--- LocaPsico: aplica as regras de feriados à criação de séries recorrentes.
--- Aditiva: substitui somente a RPC existente; não executa alterações em dados.
+-- LocaPsico: aplica regras de feriados às reservas e séries recorrentes.
+-- Aditiva: substitui funções existentes; não altera dados já gravados.
+
+CREATE OR REPLACE FUNCTION public.check_booking_conflict()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions, pg_temp
+AS $
+DECLARE
+  v_allow_holidays_global BOOLEAN := FALSE;
+  v_unblocked_holidays TEXT[] := '{}';
+  v_is_holiday BOOLEAN := FALSE;
+BEGIN
+  -- 1. Reservas canceladas não ocupam horário; permitir inclusive cancelar reserva em domingo.
+  IF NEW.payment_status = 'CANCELLED' OR NEW.status = 'cancelled' THEN
+    RETURN NEW;
+  END IF;
+
+  -- 2. Feriados nacionais fixos e datas específicas cadastradas no calendário.
+  SELECT COALESCE(allow_holidays_global, FALSE), COALESCE(unblocked_holidays, '{}'::TEXT[])
+    INTO v_allow_holidays_global, v_unblocked_holidays
+  FROM public.settings WHERE id = 'global';
+
+  v_is_holiday := (
+    to_char(NEW.booking_date, 'MM-DD') = ANY(ARRAY[
+      '01-01','04-21','05-01','09-07','10-12','11-02','11-15','11-20','12-25'
+    ])
+    OR NEW.booking_date::TEXT = ANY(ARRAY[
+      '2026-02-16','2026-02-17','2026-04-03','2026-04-21','2026-06-04'
+    ])
+  );
+  IF v_is_holiday AND NOT v_allow_holidays_global
+     AND NOT (to_char(NEW.booking_date, 'MM-DD') = ANY(v_unblocked_holidays))
+     AND NOT (NEW.booking_date::TEXT = ANY(v_unblocked_holidays)) THEN
+    RAISE EXCEPTION 'Feriado bloqueado pela administração.' USING ERRCODE = '23P01';
+  END IF;
+
+  -- 2. Domingo fechado para reservas ativas (DOW: 0 = Domingo).
+  IF EXTRACT(DOW FROM NEW.booking_date) = 0 THEN
+    RAISE EXCEPTION 'As salas não são utilizadas aos domingos.' USING ERRCODE = '22000';
+  END IF;
+
+  -- 3. Detecção de UPDATE neutro (nenhum campo de agenda alterado)
+  IF TG_OP = 'UPDATE' THEN
+    IF OLD.room_id = NEW.room_id 
+       AND OLD.booking_date = NEW.booking_date 
+       AND OLD.start_time = NEW.start_time 
+       AND OLD.end_time = NEW.end_time
+       AND OLD.booking_type = NEW.booking_type
+       AND OLD.payment_status = NEW.payment_status
+       AND OLD.status = NEW.status THEN
+      RETURN NEW;
+    END IF;
+  END IF;
+
+  -- 4. Validação operacional de horários de funcionamento
+  IF NEW.start_time < 7 THEN
+    RAISE EXCEPTION 'Horário inicial não pode ser anterior à abertura das salas (07:00).' USING ERRCODE = '22000';
+  END IF;
+
+  IF NEW.end_time <= NEW.start_time THEN
+    RAISE EXCEPTION 'Horário final da reserva deve ser estritamente maior que o horário inicial.' USING ERRCODE = '22000';
+  END IF;
+
+  IF EXTRACT(DOW FROM NEW.booking_date) = 6 AND NEW.end_time > 14 THEN
+    RAISE EXCEPTION 'Aos sábados as salas encerram as atividades às 14:00.' USING ERRCODE = '22000';
+  ELSIF NEW.end_time > 22 THEN
+    RAISE EXCEPTION 'As salas encerram as atividades às 22:00.' USING ERRCODE = '22000';
+  END IF;
+
+  -- 5. Verifica bloqueios administrativos (sala específica ou ALL)
+  IF EXISTS (
+    SELECT 1 FROM public.blocked_slots
+    WHERE (room_id = 'ALL' OR room_id = NEW.room_id)
+      AND blocked_date = NEW.booking_date
+      AND GREATEST(start_time, NEW.start_time) < LEAST(end_time, NEW.end_time)
+  ) THEN
+    RAISE EXCEPTION 'O horário selecionado está bloqueado pela administração.' USING ERRCODE = '23P01';
+  END IF;
+
+  -- 6. Verifica conflito com outras reservas ativas na mesma sala e data
+  -- Conflito ocorre se e somente se houver sobreposição nos intervalos reais:
+  -- GREATEST(start_time, NEW.start_time) < LEAST(end_time, NEW.end_time)
+  IF EXISTS (
+    SELECT 1 FROM public.bookings
+    WHERE room_id = NEW.room_id
+      AND booking_date = NEW.booking_date
+      AND id <> COALESCE(NEW.id, '00000000-0000-0000-0000-000000000000'::uuid)
+      AND payment_status <> 'CANCELLED'
+      AND status <> 'cancelled'
+      AND GREATEST(start_time, NEW.start_time) < LEAST(end_time, NEW.end_time)
+  ) THEN
+    RAISE EXCEPTION 'Este horário já está reservado nesta sala.' USING ERRCODE = '23P01';
+  END IF;
+
+  RETURN NEW;
+END;
+$;
+
+DROP TRIGGER IF EXISTS trg_check_booking_conflict ON public.bookings;
+CREATE TRIGGER trg_check_booking_conflict
+BEFORE INSERT OR UPDATE OF room_id, booking_date, start_time, end_time, booking_type, payment_status, status
+ON public.bookings
+FOR EACH ROW
+EXECUTE FUNCTION public.check_booking_conflict();
+
 
 -- 7. RPC TRANSACIONAL: public.create_recurring_series
 CREATE OR REPLACE FUNCTION public.create_recurring_series(
