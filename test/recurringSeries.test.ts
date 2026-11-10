@@ -1,4 +1,4 @@
-import { generateCandidateDates } from '../services/recurrenceService';
+import { generateCandidateDates, getHolidayConflictReason } from '../services/recurrenceService';
 import { getClosingHourForDate, SATURDAY_HOURS_END, INITIAL_PERIOD_RATES, getPeriodConfig } from '../constants';
 import { createHash } from 'crypto';
 
@@ -21,6 +21,18 @@ function assert(condition: boolean, testName: string, detail?: string) {
     console.error(`  [FAIL] ${testName} ${detail ? `- ${detail}` : ''}`);
   }
 }
+
+
+// ---------------------------------------------------------------------------
+// TESTE: Feriados em séries recorrentes e exceções administrativas
+// ---------------------------------------------------------------------------
+console.log('\nGrupo: Feriados em recorrências');
+const holidayBlocked = getHolidayConflictReason('2026-11-20', {});
+assert(Boolean(holidayBlocked), '20/11/2026 é identificado como feriado bloqueado por padrão');
+assert(!getHolidayConflictReason('2026-11-20', { allowHolidaysGlobal: true }), 'Liberação global permite agendar no feriado');
+assert(!getHolidayConflictReason('2026-11-20', { unblockedHolidays: ['11-20'] }), 'Liberação individual MM-DD permite agendar no feriado');
+assert(!getHolidayConflictReason('2026-11-20', { unblockedHolidays: ['2026-11-20'] }), 'Liberação individual YYYY-MM-DD permite agendar no feriado');
+assert(!getHolidayConflictReason('2026-11-13', {}), 'Data comum não é bloqueada como feriado');
 
 console.log('================================================================');
 console.log('INICIANDO BATERIA DE TESTES TÉCNICOS LOCAIS - AGENDAMENTOS RECORRENTES');
