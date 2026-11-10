@@ -39,6 +39,8 @@ BEGIN
   SELECT COALESCE(allow_holidays_global, FALSE), COALESCE(unblocked_holidays, '{}'::TEXT[])
     INTO v_allow_holidays_global, v_unblocked_holidays
   FROM public.settings WHERE id = 'global';
+  v_allow_holidays_global := COALESCE(v_allow_holidays_global, FALSE);
+  v_unblocked_holidays := COALESCE(v_unblocked_holidays, '{}'::TEXT[]);
 
   v_is_holiday := (
     to_char(NEW.booking_date, 'MM-DD') = ANY(ARRAY[
