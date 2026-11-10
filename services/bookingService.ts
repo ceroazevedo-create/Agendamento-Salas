@@ -165,90 +165,37 @@ export const bookingService = {
 
     if (isSupabaseConfigured) {
       try {
-        const [bookRes, profRes] = await Promise.all([
-          supabase.from('bookings').select('*'),
-          supabase.from('profiles').select('*')
-        ]);
-
-        if (bookRes.data && Array.isArray(bookRes.data)) {
-          const profilesMap = new Map<string, any>();
-          if (profRes.data) {
-            profRes.data.forEach((p: any) => profilesMap.set(p.id, p));
-          }
-
-          const localMap = new Map<string, Booking>();
-          localBookings.forEach(lb => localMap.set(String(lb.id), lb));
-
-          const activeRemote = bookRes.data
-            .filter((b: any) => {
-              const status = (b.payment_status || b.status || '').toUpperCase();
-              return status !== 'CANCELLED';
-            })
-            .map((b: any) => {
-              const mapped = mapDbBookingToBooking(b, profilesMap);
-              const localMatch = localMap.get(mapped.id);
-              if (localMatch) {
-                return {
-                  ...mapped,
-                  clientName: localMatch.clientName || mapped.clientName,
-                  notes: localMatch.notes || mapped.notes,
-                  paymentStatus: localMatch.paymentStatus || mapped.paymentStatus,
-                  durationHours: localMatch.durationHours || mapped.durationHours,
-                  endTimeHour: localMatch.endTimeHour || mapped.endTimeHour,
-                  periodShift: localMatch.periodShift || mapped.periodShift,
-                  periodName: localMatch.periodName || mapped.periodName,
-                  type: localMatch.type || mapped.type
-                };
-              }
-              return mapped;
-            });
-
-          // PRESERVA RESERVAS LOCAIS QUE AINDA NÃO FORAM SINCRONIZADAS COM O SUPABASE
-          const remoteIds = new Set(activeRemote.map(b => String(b.id)));
-          const unSyncedLocal = localActive.filter(lb => {
-            if (remoteIds.has(String(lb.id))) return false;
-
-            // Só mantém uma reserva exclusivamente local quando a consulta de perfis
-            // confirmou que seu proprietário ainda existe e está ativo. Se o perfil
-            // não veio do servidor (inativo/removido), não podemos tratar a cópia local
-            // como uma reserva pendente: isso ressuscitaria reservas já excluídas.
-            if (profRes.error || !Array.isArray(profRes.data)) return false;
-            const ownerProfile = profilesMap.get(String(lb.userId || ''));
-            if (!ownerProfile || String(ownerProfile.status || '').toUpperCase() !== 'ACTIVE') {
-              return false;
-            }
-
-            // Filtro de segurança: remove reservas falsas de teste (Sala 2 em 14/10 às 18h e 19h)
-            const isSala2 = String(lb.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
-            const isTargetDate = String(lb.date || '').split('T')[0] === '2026-10-14';
-            const is18or19 = (lb.hour === 18 || lb.hour === 19) ||
-              (Number(lb.hour) <= 18 && Number(lb.endTimeHour || (lb.hour + (lb.durationHours || 1))) > 18) ||
-              (Number(lb.hour) <= 19 && Number(lb.endTimeHour || (lb.hour + (lb.durationHours || 1))) > 19);
-            if (isSala2 && isTargetDate && is18or19) return false;
-
-            const overlapsWithRemote = activeRemote.some(rb => 
-              rb.roomId.toLowerCase().trim() === lb.roomId.toLowerCase().trim() &&
-              rb.date === lb.date &&
-              Math.max(rb.hour, lb.hour) < Math.min(rb.endTimeHour, lb.endTimeHour)
-            );
-            return !overlapsWithRemote;
+        const { data, error } = await supabase.rpc('get_calendar_bookings');
+        if (error) throw error;
+        if (Array.isArray(data)) {
+          const { data: authData } = await supabase.auth.getUser();
+          const currentUserId = authData.user?.id;
+          const localMap = new Map(localBookings.map(b => [String(b.id), b]));
+          const remote = data.map((row: any) => {
+            const mapped = mapDbBookingToBooking(row);
+            // Cópias locais só podem complementar a reserva do próprio usuário.
+            const local = mapped.userId === currentUserId ? localMap.get(mapped.id) : undefined;
+            return local ? {
+              ...mapped,
+              clientName: mapped.clientName || local.clientName,
+              notes: mapped.notes || local.notes,
+              durationHours: mapped.durationHours || local.durationHours,
+              endTimeHour: mapped.endTimeHour || local.endTimeHour,
+              periodShift: mapped.periodShift || local.periodShift,
+              periodName: mapped.periodName || local.periodName,
+              type: mapped.type || local.type
+            } : mapped;
           });
-
-          // Consolida remotas com locais ativas
-          const combined = [...activeRemote, ...unSyncedLocal].filter(b => {
-            const isSala2 = String(b.roomId || '').toLowerCase().replace(/\s+/g, '') === 'sala2';
-            const isTargetDate = String(b.date || '').split('T')[0] === '2026-10-14';
-            const is18or19 = (b.hour === 18 || b.hour === 19) ||
-              (Number(b.hour) <= 18 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 18) ||
-              (Number(b.hour) <= 19 && Number(b.endTimeHour || (b.hour + (b.durationHours || 1))) > 19);
-            return !(isSala2 && isTargetDate && is18or19);
-          });
-          saveStoredBookings(combined);
-
-          return combined;
+          // Não ressuscita reservas locais ausentes do servidor: a RPC é a fonte de verdade.
+          saveStoredBookings(remote);
+          return remote;
         }
+        throw new Error('Resposta inválida ao carregar a agenda compartilhada.');
       } catch (err) {
-        console.warn('Erro ao carregar reservas do Supabase, usando local:', err);
+        console.warn('Erro ao carregar agenda segura do Supabase:', err);
+        // Falha fechada: no modo remoto, não exibe reservas locais de terceiros.
+        const { data: authData } = await supabase.auth.getUser();
+        return localActive.filter(b => b.userId === authData.user?.id);
       }
     }
 
