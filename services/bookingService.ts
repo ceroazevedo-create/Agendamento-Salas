@@ -237,7 +237,7 @@ export const bookingService = {
       try {
         const [bookRes, profRes] = await Promise.all([
           supabase.from('bookings').select('*'),
-          supabase.from('profiles').select('*')
+          supabase.from('profiles').select('id,full_name')
         ]);
 
         if (bookRes.data) {
