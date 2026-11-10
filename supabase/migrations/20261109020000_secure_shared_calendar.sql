@@ -57,7 +57,7 @@ BEGIN
     CASE WHEN v_admin OR b.professional_id = v_uid THEN b.hourly_rate ELSE NULL END,
     CASE WHEN v_admin OR b.professional_id = v_uid THEN b.total_amount ELSE NULL END,
     CASE WHEN v_admin OR b.professional_id = v_uid THEN b.payment_status ELSE NULL END,
-    CASE WHEN v_admin OR b.professional_id = v_uid THEN b.status ELSE 'confirmed' END,
+    CASE WHEN v_admin OR b.professional_id = v_uid THEN b.status ELSE NULL END,
     b.period_shift,
     b.period_name,
     CASE WHEN v_admin OR b.professional_id = v_uid THEN b.client_id ELSE NULL END,
