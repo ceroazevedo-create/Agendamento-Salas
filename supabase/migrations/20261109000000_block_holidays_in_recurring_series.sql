@@ -61,6 +61,8 @@ DECLARE
   
   v_response_payload JSONB;
   v_final_notes TEXT;
+  v_allow_holidays_global BOOLEAN := FALSE;
+  v_unblocked_holidays TEXT[] := ARRAY[]::TEXT[];
 BEGIN
   -- 7.1 AUTENTICAÇÃO E PERMISSÕES (RBAC)
   v_caller_id := auth.uid();
@@ -250,6 +252,12 @@ BEGIN
 
   PERFORM public.acquire_room_date_locks(v_lock_items);
 
+  -- Carrega a política de feriados; ausência de configuração mantém o padrão bloqueado.
+  SELECT COALESCE(allow_holidays_global, FALSE), COALESCE(unblocked_holidays, ARRAY[]::TEXT[])
+    INTO v_allow_holidays_global, v_unblocked_holidays
+  FROM public.settings
+  WHERE id = 'global';
+
   -- 7.7 AVALIAÇÃO DE CADA OCORRÊNCIA INDIVIDUALMENTE CONFORME O DIA DA SEMANA
   FOREACH v_cur_date IN ARRAY v_sorted_dates LOOP
     v_day_of_week := EXTRACT(DOW FROM v_cur_date)::integer;
@@ -336,26 +344,19 @@ BEGIN
 
     -- Regra 3: Feriados nacionais (mesma lista usada pela interface).
     -- A administração pode liberar todos os feriados ou datas específicas.
-    IF NOT v_has_conflict THEN
-      IF EXISTS (
-        SELECT 1
-        FROM public.settings s
-        WHERE s.id = 'global'
-          AND COALESCE(s.allow_holidays_global, FALSE) = FALSE
-          AND (
-            to_char(v_cur_date, 'MM-DD') = ANY (ARRAY[
-              '01-01', '04-21', '05-01', '09-07', '10-12',
-              '11-02', '11-15', '11-20', '12-25'
-            ]::TEXT[])
-            OR to_char(v_cur_date, 'YYYY-MM-DD') = ANY (ARRAY[
-              '2026-02-16', '2026-02-17', '2026-04-03',
-              '2026-04-21', '2026-06-04'
-            ]::TEXT[])
-          )
-          AND NOT (
-            to_char(v_cur_date, 'MM-DD') = ANY (COALESCE(s.unblocked_holidays, ARRAY[]::TEXT[]))
-            OR to_char(v_cur_date, 'YYYY-MM-DD') = ANY (COALESCE(s.unblocked_holidays, ARRAY[]::TEXT[]))
-          )
+    IF NOT v_has_conflict AND NOT v_allow_holidays_global THEN
+      IF (
+        to_char(v_cur_date, 'MM-DD') = ANY (ARRAY[
+          '01-01', '04-21', '05-01', '09-07', '10-12',
+          '11-02', '11-15', '11-20', '12-25'
+        ]::TEXT[])
+        OR to_char(v_cur_date, 'YYYY-MM-DD') = ANY (ARRAY[
+          '2026-02-16', '2026-02-17', '2026-04-03',
+          '2026-04-21', '2026-06-04'
+        ]::TEXT[])
+      ) AND NOT (
+        to_char(v_cur_date, 'MM-DD') = ANY (v_unblocked_holidays)
+        OR to_char(v_cur_date, 'YYYY-MM-DD') = ANY (v_unblocked_holidays)
       ) THEN
         v_has_conflict := TRUE;
         v_conflict_reason := 'Esta data é feriado nacional e está bloqueada pela administração.';
