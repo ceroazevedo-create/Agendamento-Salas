@@ -6,7 +6,7 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, extensions, pg_temp
-AS $
+AS $$
 DECLARE
   v_allow_holidays_global BOOLEAN := FALSE;
   v_unblocked_holidays TEXT[] := '{}';
@@ -15,25 +15,6 @@ BEGIN
   -- 1. Reservas canceladas não ocupam horário; permitir inclusive cancelar reserva em domingo.
   IF NEW.payment_status = 'CANCELLED' OR NEW.status = 'cancelled' THEN
     RETURN NEW;
-  END IF;
-
-  -- 2. Feriados nacionais fixos e datas específicas cadastradas no calendário.
-  SELECT COALESCE(allow_holidays_global, FALSE), COALESCE(unblocked_holidays, '{}'::TEXT[])
-    INTO v_allow_holidays_global, v_unblocked_holidays
-  FROM public.settings WHERE id = 'global';
-
-  v_is_holiday := (
-    to_char(NEW.booking_date, 'MM-DD') = ANY(ARRAY[
-      '01-01','04-21','05-01','09-07','10-12','11-02','11-15','11-20','12-25'
-    ])
-    OR NEW.booking_date::TEXT = ANY(ARRAY[
-      '2026-02-16','2026-02-17','2026-04-03','2026-04-21','2026-06-04'
-    ])
-  );
-  IF v_is_holiday AND NOT v_allow_holidays_global
-     AND NOT (to_char(NEW.booking_date, 'MM-DD') = ANY(v_unblocked_holidays))
-     AND NOT (NEW.booking_date::TEXT = ANY(v_unblocked_holidays)) THEN
-    RAISE EXCEPTION 'Feriado bloqueado pela administração.' USING ERRCODE = '23P01';
   END IF;
 
   -- 2. Domingo fechado para reservas ativas (DOW: 0 = Domingo).
@@ -52,6 +33,25 @@ BEGIN
        AND OLD.status = NEW.status THEN
       RETURN NEW;
     END IF;
+  END IF;
+
+  -- Feriados nacionais fixos e datas específicas cadastradas no calendário.
+  SELECT COALESCE(allow_holidays_global, FALSE), COALESCE(unblocked_holidays, '{}'::TEXT[])
+    INTO v_allow_holidays_global, v_unblocked_holidays
+  FROM public.settings WHERE id = 'global';
+
+  v_is_holiday := (
+    to_char(NEW.booking_date, 'MM-DD') = ANY(ARRAY[
+      '01-01','04-21','05-01','09-07','10-12','11-02','11-15','11-20','12-25'
+    ])
+    OR NEW.booking_date::TEXT = ANY(ARRAY[
+      '2026-02-16','2026-02-17','2026-04-03','2026-04-21','2026-06-04'
+    ])
+  );
+  IF v_is_holiday AND NOT v_allow_holidays_global
+     AND NOT (to_char(NEW.booking_date, 'MM-DD') = ANY(v_unblocked_holidays))
+     AND NOT (NEW.booking_date::TEXT = ANY(v_unblocked_holidays)) THEN
+    RAISE EXCEPTION 'Feriado bloqueado pela administração.' USING ERRCODE = '23P01';
   END IF;
 
   -- 4. Validação operacional de horários de funcionamento
