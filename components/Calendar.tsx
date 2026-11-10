@@ -2034,9 +2034,11 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
         {selectedBooking && (
           <div className="space-y-6">
             <div className="bg-teal-50 border border-teal-100 rounded-3xl p-5 text-center space-y-1">
-              <span className="text-[10px] font-black text-teal-600 uppercase tracking-widest">
-                Identificador da Reserva: #{selectedBooking.id}
-              </span>
+              {(isAdmin || selectedBooking.userId === user.id) && (
+                <span className="text-[10px] font-black text-teal-600 uppercase tracking-widest">
+                  Identificador da Reserva: #{selectedBooking.id}
+                </span>
+              )}
               <h3 className="text-xl font-black text-gray-900">
                 {selectedBooking.roomId}
               </h3>
@@ -2046,7 +2048,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
             </div>
 
             {/* Painel Especial de Agendamento Recorrente (Seção 7 e 8) */}
-            {selectedBooking.recurrenceId && (
+            {(isAdmin || selectedBooking.userId === user.id) && selectedBooking.recurrenceId && (
               <div className="bg-teal-50/70 border border-teal-200/80 rounded-2xl p-4 space-y-2.5">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -2088,21 +2090,26 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                 <span className="font-black text-teal-700">{selectedBooking.userName}</span>
               </div>
 
-              <div className="flex justify-between py-1 border-b border-gray-200/60">
+              {(isAdmin || selectedBooking.userId === user.id) && (
+<div className="flex justify-between py-1 border-b border-gray-200/60">
                 <span className="text-gray-400 font-bold uppercase tracking-wider">Paciente / Cliente:</span>
                 <span className="font-black">
                   {selectedBooking.clientName || 'Não especificado'}
                 </span>
               </div>
+              )}
 
-              <div className="flex justify-between py-1 border-b border-gray-200/60">
+              {(isAdmin || selectedBooking.userId === user.id) && (
+<div className="flex justify-between py-1 border-b border-gray-200/60">
                 <span className="text-gray-400 font-bold uppercase tracking-wider">Valor Aplicado:</span>
                 <span className="font-black text-gray-900">
                   R$ {selectedBooking.totalAmount.toFixed(2)}
                 </span>
               </div>
+              )}
 
-              <div className="flex justify-between py-1 items-center">
+              {(isAdmin || selectedBooking.userId === user.id) && (
+<div className="flex justify-between py-1 items-center">
                 <span className="text-gray-400 font-bold uppercase tracking-wider">Status do Pagamento:</span>
                 <span className={`px-2.5 py-1 rounded-lg font-black uppercase text-[10px] tracking-wider ${
                   selectedBooking.paymentStatus === 'PAID'
@@ -2112,6 +2119,7 @@ export const Calendar: React.FC<CalendarProps> = ({ user, onOpenClients }) => {
                   {selectedBooking.paymentStatus === 'PAID' ? 'Pago' : 'Pendente'}
                 </span>
               </div>
+              )}
             </div>
 
             {!isAdmin && selectedBooking.userId === user.id && cancellationLimitHours > 0 && (
