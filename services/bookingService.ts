@@ -339,46 +339,35 @@ export const bookingService = {
           }
         }
 
-        // Verifica reservas na data e sala
-        const { data: existingBookings, error: bookErr } = await supabase
-          .from('bookings')
-          .select('*');
+        // Consulta somente os campos públicos necessários para detectar ocupação.
+        const { data: existingBookings, error: bookErr } = await supabase.rpc('get_calendar_bookings');
 
-        if (!bookErr && existingBookings) {
+        if (!bookErr && Array.isArray(existingBookings)) {
           const normRoom = String(roomId).trim().toLowerCase();
           const normDate = String(date).split('T')[0].trim();
+          const dayBookings = existingBookings.filter((booking: any) =>
+            String(booking.room_id || '').trim().toLowerCase() === normRoom &&
+            String(booking.booking_date || '').split('T')[0].trim() === normDate &&
+            (!excludeBookingId || String(booking.id) !== String(excludeBookingId))
+          );
 
-          const dayBookings = existingBookings.filter((b: any) => {
-            const bRoom = String(b.room_id || '').trim().toLowerCase();
-            const bRawDate = String(b.date || b.booking_date || '');
-            const bDate = bRawDate.includes('T') ? bRawDate.split('T')[0] : bRawDate.trim();
-            const bStatus = (b.payment_status || b.status || '').toUpperCase();
-
-            if (bRoom !== normRoom) return false;
-            if (bDate !== normDate) return false;
-            if (bStatus === 'CANCELLED') return false;
-            if (excludeBookingId && String(b.id) === String(excludeBookingId)) return false;
-            return true;
-          });
-
-          for (const b of dayBookings) {
-            const bStart = Number(b.hour !== undefined ? b.hour : b.start_time);
-            const bDuration = Number(b.duration_hours || b.total_hours || (b.end_time ? Number(b.end_time) - bStart : 1));
-            const bEnd = Number(b.end_time_hour || b.end_time || (bStart + bDuration));
-            const bType = b.type || b.booking_type;
+          for (const booking of dayBookings) {
+            const bStart = Number(booking.start_time);
+            const bEnd = Number(booking.end_time);
+            const periodLabel = booking.period_name
+              ? ` (Período da ${booking.period_name})`
+              : (booking.booking_type === 'PERIOD' && bEnd - bStart >= 14 ? ' (Período Integral)' : '');
 
             if (Math.max(startHour, bStart) < Math.min(endHour, bEnd)) {
-              const periodLabel = b.period_name || b.periodName 
-                ? ` (Período da ${b.period_name || b.periodName})` 
-                : (bType === 'PERIOD' && (bEnd - bStart >= 14) ? ' (Período Integral)' : '');
-              return { 
-                hasConflict: true, 
-                reason: `O horário das ${bStart}:00 às ${bEnd}:00${periodLabel} já está reservado nesta sala.` 
+              return {
+                hasConflict: true,
+                reason: `O horário das ${bStart}:00 às ${bEnd}:00${periodLabel} já está reservado nesta sala.`
               };
             }
           }
           return { hasConflict: false };
         }
+        if (bookErr) throw bookErr;
       } catch (e) {
         console.warn('Erro ao checar conflito no Supabase, checando local:', e);
       }
